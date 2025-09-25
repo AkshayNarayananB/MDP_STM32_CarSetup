@@ -1165,9 +1165,24 @@ void orbit(float target_angle, int base_pwm, float steer_angle){
 	//Distance btwn obstacle and bot is 1 iphone 13 pro max and a bit more away
 	for (int i = 0; i<3; i++){
 		turn_by_angle_degrees(target_angle, base_pwm, steer_angle);
-		const char *snap = "snap\n";//Send msg to RPI to capture now
+		const char *snap = "SNAP\n";//Send msg to RPI to capture now
 		HAL_UART_Transmit(&huart3, (uint8_t*)snap,strlen(snap), HAL_MAX_DELAY);
 		HAL_Delay(5000); //5 Seconds for camera to snap
+		while (1)
+		    {
+		        if (HAL_UART_Receive(&huart3, &rxByte, 1, HAL_MAX_DELAY) == HAL_OK)
+		        {
+		            // Draw one character at current position
+		            OLED_ShowChar(xPos, yPos, rxByte, 16, 1);  // size=16, mode=1 (adjust if needed)
+		            OLED_Refresh_Gram();
+
+		            if(rxByte == 'bu'){
+		            	break;
+		            }
+		            else{
+		            	Motor_stop();
+		            	exit(0);
+		            }
 		//TBD - Receive msg from camera before moving, have a timeout
 	}
 }
@@ -1332,23 +1347,18 @@ int main(void)
   //HAL_Delay(500);
   //turn_by_angle_degrees(-60.0,2000,-45.0f);
 
-  turn_by_angle_degrees(65.0, 2000, 35.0); //Right
+  turn_by_angle_degrees(-65.0, 2000, 35.0); //Left
   Motor_stop();
-  turn_by_angle_degrees(-65.0,2000,-35.0); //Left
+  turn_by_angle_degrees(65.0,2000,-35.0); //Right
   Motor_stop();
-  turn_by_angle_degrees(65.0, 2000, 35.0); //Right
-  Motor_stop();
-  turn_by_angle_degrees(65.0, 2000, 35.0); //Right
-  Motor_stop();
-  turn_by_angle_degrees(65.0, 2000, 35.0); //Right
-  Motor_stop();
-  Motor_set_pwm(1000, 800);
   HAL_Delay(2000);
-  Motor_stop();
+  orbit(68.0,2000,35.0);
 
   while (1) {
 
-	uart_polling_task();
+	//uart_polling_task();
+	const char *msg = "SNAP\r\n";  // example message
+	HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
 
 	if (commandReady)
 	{
