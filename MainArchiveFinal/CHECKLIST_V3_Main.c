@@ -1161,6 +1161,14 @@ void uart_polling_task(void)
 
 //Checklist for checking obstacle sides
 void orbit(float target_angle, int base_pwm, float steer_angle){
+
+	uint8_t rxByte;
+	uint8_t xPos = 0;       // Track X position (column)
+	uint8_t yPos = 0;       // Track Y row (optional if you want wrapping by line)
+	uint8_t charWidth = 8;  // Assume font width (adjust if your font differs)
+	uint8_t while1 = 0;
+
+	OLED_Clear();
 	//For current set up,: 68.0, 2000, 35.0 : it will turn 90 degrees clockwise 3x from starting
 	//Distance btwn obstacle and bot is 1 iphone 13 pro max and a bit more away
 	for (int i = 0; i<3; i++){
@@ -1168,15 +1176,17 @@ void orbit(float target_angle, int base_pwm, float steer_angle){
 		const char *snap = "SNAP\n";//Send msg to RPI to capture now
 		HAL_UART_Transmit(&huart3, (uint8_t*)snap,strlen(snap), HAL_MAX_DELAY);
 		HAL_Delay(5000); //5 Seconds for camera to snap
-		while (1)
+		while (while1!= 1)
 		    {
 		        if (HAL_UART_Receive(&huart3, &rxByte, 1, HAL_MAX_DELAY) == HAL_OK)
 		        {
+		        	const char *snap = "SNAP\n";//Send msg to RPI to capture now
+		        	HAL_UART_Transmit(&huart3, (uint8_t*)snap,strlen(snap), HAL_MAX_DELAY);
 		            // Draw one character at current position
 		            OLED_ShowChar(xPos, yPos, rxByte, 16, 1);  // size=16, mode=1 (adjust if needed)
 		            OLED_Refresh_Gram();
 
-		            if(rxByte == 'bu'){
+		            if(rxByte == 'b'){
 		            	break;
 		            }
 		            else{
@@ -1184,6 +1194,8 @@ void orbit(float target_angle, int base_pwm, float steer_angle){
 		            	exit(0);
 		            }
 		//TBD - Receive msg from camera before moving, have a timeout
+		        }
+		    }
 	}
 }
 
@@ -2260,6 +2272,7 @@ void Error_Handler(void)
   }
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
