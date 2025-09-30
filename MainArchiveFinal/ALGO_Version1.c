@@ -597,8 +597,8 @@ void run_straight_to_distance_cm(float target_cm, int base_pwm)
         if (right_pwm > pwmMax) right_pwm = pwmMax;
         if (right_pwm < pwmMin) right_pwm = pwmMin;
 
-        if (heading_integral > 100) heading_integral = 100;
-        if (heading_integral < -100) heading_integral = -100;
+        if (heading_integral > 500) heading_integral = 500;
+        if (heading_integral < -500) heading_integral = -500;
 
         if (speed_integral > 50) speed_integral = 50;
         if (speed_integral < -50) speed_integral = -50;
@@ -1612,7 +1612,7 @@ int main(void)
   }
 
   float gyro_bias_sum = 0.0f;
-    const int num_cal_samples = 500;
+    const int num_cal_samples = 700;
     for (int i = 0; i < num_cal_samples; i++) {
         int16_t gz_raw;
         ICM20948_ReadRaw(NULL, NULL, NULL, NULL, NULL, &gz_raw);
