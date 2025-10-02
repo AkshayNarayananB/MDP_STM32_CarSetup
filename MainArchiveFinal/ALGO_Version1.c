@@ -22,6 +22,10 @@ UART_HandleTypeDef huart3;
 char buf[64];
 float gyro_bias;
 
+// Define the window where deceleration begins (TUNE THIS)
+const float SLOWDOWN_DEGREES = 10.0f; // Start slowing down 10 degrees before target
+const int MIN_TURN_PWM = 500;          // Minimum speed to maintain movement (Tune this)
+
 static inline void Servo_WriteUS(uint16_t us)
 {
   if (us < 500)
@@ -408,8 +412,14 @@ void run_straight_to_distance_cm_backward(float target_cm, int base_pwm)
         // --- Apply Corrections (SIGNS FLIPPED FOR BACKWARD MOTION) ---
         // Original Forward: Left = PWM + (+G - E), Right = PWM + (-G + E)
         // Backward: Left = PWM + (-G + E), Right = PWM + (+G - E)
-        int left_pwm  = pwm_backward + (int)(-0.7 * gyro_correction + 0.3 * encoder_correction);
-        int right_pwm = pwm_backward + (int)( 0.7 * gyro_correction - 0.3 * encoder_correction);
+
+        //int left_pwm  = pwm_backward + (int)(-0.7 * gyro_correction + 0.3 * encoder_correction);
+        //int right_pwm = pwm_backward + (int)( 0.7 * gyro_correction - 0.3 * encoder_correction);
+
+        // Gemini Input, reverse signs for reverse directed drift
+        // Suggested fix: Signs of gyro_correction flipped for backward steering logic
+        int left_pwm  = pwm_backward + (int)( 0.7 * gyro_correction + 0.3 * encoder_correction);  // Added correction (slowing down left in reverse)
+        int right_pwm = pwm_backward + (int)(-0.7 * gyro_correction - 0.3 * encoder_correction); // Subtracted correction (speeding up right in reverse)
 
         // --- Clamp PWM ---
         // Ensure the magnitude of PWM stays within the allowed range
@@ -728,7 +738,7 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
     OLED_ShowString(0, 20, (uint8_t *)buf);
     OLED_Refresh_Gram();
 }
-
+/*
 void turn_by_angle_degrees_backwards(float target_angle, int base_pwm, float steer_angle)
 {
     // --- PID state variables ---
@@ -782,6 +792,114 @@ void turn_by_angle_degrees_backwards(float target_angle, int base_pwm, float ste
 
         // --- Check for completion ---
         if (fabs(heading) >= fabs(target_angle))
+        {
+            Motor_stop();
+            Steering_ToUS(0.0);
+            break;
+        }
+
+        // --- Update current heading on OLED ---
+        sprintf(buf, "Current: %.1f deg", heading);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+        OLED_Refresh_Gram();
+
+        HAL_Delay(10); // ~100 Hz loop
+    }
+
+    // --- Final OLED display after completion ---
+    OLED_Clear();
+    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
+    sprintf(buf, "Final Angle: %.1f", heading);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+}
+*/
+
+void turn_by_angle_degrees_backwards(float target_angle, int base_pwm, float steer_angle)
+{
+    // --- State Variables ---
+    float heading = 0.0f;
+    float gz_filtered = 0.0f;
+    uint32_t last_time = HAL_GetTick();
+
+    // Raw sensor variables for reading (only need gz)
+    int16_t gz;
+    float gz_dps;
+
+    // --- Dynamic Control Parameters (TUNE THESE!) ---
+    const float SLOWDOWN_DEGREES = 10.0f;     // Start slowing down this many degrees before target
+    const int MIN_TURN_PWM = 50;              // Minimum PWM to prevent stalling
+    const float COMPLETION_TOLERANCE = 0.5f;  // Stop when the remaining angle is <= this value
+
+    // NOTE: gyro_bias is assumed to be a globally defined/accessible float in DPS.
+
+    // --- Ensure steer_angle aligns with target_angle direction ---
+    // (Kept original logic for directional consistency)
+    if (target_angle > 0 && steer_angle < 0) {
+        steer_angle = -steer_angle;
+    } else if (target_angle < 0 && steer_angle > 0) {
+        steer_angle = -steer_angle;
+    }
+
+    // Ensure the steer_angle is within the safe range
+    if (steer_angle > 45.0f) steer_angle = 45.0f;
+    if (steer_angle < -45.0f) steer_angle = -45.0f;
+
+    // Set the steering angle once
+    Steering_ToUS(steer_angle);
+
+    // *** REMOVED: Initial constant Motor_set_pwm_reverse(base_pwm, base_pwm);
+    // PWM is now set dynamically inside the loop.
+
+    // Prepare OLED display
+    OLED_Clear();
+    char buf[32];
+    sprintf(buf, "Target: %.1f deg", target_angle);
+    OLED_ShowString(0, 0, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+
+    while (1)
+    {
+        // --- Read and scale gyroscope data ---
+        // Only reading gz is necessary
+        ICM20948_ReadRaw(NULL, NULL, NULL, NULL, NULL, &gz);
+        gz_dps = gz / 131.0f;
+
+        // *** FIX 1: Apply the Gyro Bias for stability ***
+        // This is crucial for accurate integration
+        gz_dps = gz_dps - gyro_bias;
+
+        // --- Δt calculation ---
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time = now;
+
+        // --- Gyro filtering & heading integration ---
+        // Slightly stronger filter (0.95/0.05) is recommended for turn accuracy
+        gz_filtered = 0.95f * gz_filtered + 0.05f * gz_dps;
+        heading += gz_filtered * dt;
+
+        // --- Dynamic PWM Scaling (Fixes Overshoot) ---
+        float angle_left_to_turn = fabs(target_angle) - fabs(heading);
+        int current_pwm = base_pwm;
+
+        if (angle_left_to_turn < SLOWDOWN_DEGREES) {
+            // Calculate a ratio (0.0 to 1.0) based on the remaining slowdown distance
+            float ratio = angle_left_to_turn / SLOWDOWN_DEGREES;
+
+            // Linearly scale the PWM between MIN_TURN_PWM and base_pwm
+            current_pwm = (int)(MIN_TURN_PWM + ratio * (base_pwm - MIN_TURN_PWM));
+
+            // Ensure bounds are respected
+            if (current_pwm < MIN_TURN_PWM) current_pwm = MIN_TURN_PWM;
+        }
+
+        // Apply the dynamically calculated PWM
+        Motor_set_pwm_reverse(current_pwm, current_pwm);
+
+        // --- Check for completion ---
+        if (angle_left_to_turn <= COMPLETION_TOLERANCE)
         {
             Motor_stop();
             Steering_ToUS(0.0);
@@ -1621,32 +1739,64 @@ int main(void)
   }
   gyro_bias = gyro_bias_sum / num_cal_samples;
 
-  run_straight_to_distance_cm(80.0, 2000);
-  HAL_Delay(800);
-  //turn_by_angle_degrees(33.25, 2000, 20.0);
-  HAL_Delay(800);
-  //turn_by_angle_degrees(33.25, 2000, 20.0);
-
-
+  // -- Path Sample Functions -- //
   /*
-  turn_by_angle_degrees(45, 2000, 25.0); //forward right
-  turn_by_angle_degrees(45, 2000, 25.0); //forward left
-
-  //segment 2
-  run_straight_to_distance_cm_backward(10.0, 2000);
-  turn_by_angle_degrees(-45, 2000, -25.0); //left forward
+  run_straight_to_distance_cm(80.0, 2000);
   run_straight_to_distance_cm(20.0, 2000); // 2 forward
-  turn_by_angle_degrees(-45, 2000, -25.0); //left forward
-  run_straight_to_distance_cm(10.0, 2000); //forward
-  turn_by_angle_degrees_backwards(45, 2000, 25.0); //back right
-  run_straight_to_distance_cm_backward(20.0, 2000); //2 backward
-  turn_by_angle_degrees_backwards(45, 2000, 25.0); //right back
-  run_straight_to_distance_cm_backward(20.0, 2000); //2 back
-  turn_by_angle_degrees_backwards(45, 2000, 25.0); //back right
-  turn_by_angle_degrees_backwards(-45, 2000, -25.0); //back left
+
+  HAL_Delay(800);
+  turn_by_angle_degrees(-33.25, 2000, 20.0); //left
+  HAL_Delay(800);
+  turn_by_angle_degrees(33.25, 2000, 20.0); //right
+
+  run_straight_to_distance_cm_backward(80.0, 2000); // 2 forward
+  HAL_Delay(1000);
+  turn_by_angle_degrees_backwards(33.25, 2000, 20.0); //back right
+  HAL_Delay(1000);
+  turn_by_angle_degrees_backwards(33.25, 2000, 20.0); //back right
+  HAL_Delay(1000);
+  turn_by_angle_degrees_backwards(-30.25, 2000, -18.0); //back left
+  HAL_Delay(1000);
+  turn_by_angle_degrees_backwards(-30.25, 2000, -18.0); //back left
 
   */
 
+
+
+  // -- Sample Path -- //
+  //segment 1
+  run_straight_to_distance_cm(80.0,2000);
+  HAL_Delay(800);
+  turn_by_angle_degrees(33.25,2000,20.0);
+  HAL_Delay(800);
+  turn_by_angle_degrees(33.25,2000,20.0);
+  Motor_stop();
+  HAL_Delay(3000);
+
+  //segment 2
+  run_straight_to_distance_cm_backward(10.0, 2000);
+  HAL_Delay(800);
+  turn_by_angle_degrees(-33.25, 2000, 20.0); //left
+  HAL_Delay(800);
+  run_straight_to_distance_cm(20.0, 2000); // 2 forward
+  HAL_Delay(800);
+  turn_by_angle_degrees(-33.25, 2000, 20.0); //left
+  HAL_Delay(800);
+  run_straight_to_distance_cm(10.0, 2000); //forward
+  HAL_Delay(800);
+  turn_by_angle_degrees_backwards(33.25, 2000, 20.0); //right //back right
+  HAL_Delay(800);
+  run_straight_to_distance_cm_backward(20.0, 2000); //2 backward
+  HAL_Delay(800);
+  turn_by_angle_degrees_backwards(33.25, 2000, 20.0); //right //back right
+  HAL_Delay(800);
+  run_straight_to_distance_cm_backward(20.0, 2000); //2 back
+  HAL_Delay(800);
+  turn_by_angle_degrees_backwards(33.25, 2000, 20.0); //right //back right
+  HAL_Delay(800);
+  turn_by_angle_degrees_backwards(-30.25, 2000, -18.0); //back left
+  HAL_Delay(800);
+  Motor_stop();
 
 
   //orbit(68.0,2000,35.0);
