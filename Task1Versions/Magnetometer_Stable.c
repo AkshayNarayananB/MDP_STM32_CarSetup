@@ -21,9 +21,19 @@ UART_HandleTypeDef huart3;
 
 char buf[64];
 float gyro_bias;
-int16_t MAG_BIAS_X = -68;
-int16_t MAG_BIAS_Y = 4;
-int16_t MAG_BIAS_Z = 149;
+//int16_t MAG_BIAS_X = -68;
+//int16_t MAG_BIAS_Y = 4;
+//int16_t MAG_BIAS_Z = 149;
+#define MAG_BIAS_X  17.83697
+#define MAG_BIAS_Y -90.91626
+#define MAG_BIAS_Z  41.17581
+
+float MAG_SOFT[3][3] = {
+    { 3.53823628e-04, -3.72760336e-06,  2.35228020e-05 },
+    {-3.72760336e-06,  3.57798362e-04, -1.10186884e-05 },
+    { 2.35228020e-05, -1.10186884e-05,  3.69198217e-04 }
+};
+
 
 // Define the window where deceleration begins (TUNE THIS)
 const float SLOWDOWN_DEGREES = 10.0f; // Start slowing down 10 degrees before target
@@ -299,6 +309,157 @@ void Motor_forward_reset(void)
     mf_gz_filtered = 0.0f;
 }
 
+void run_straight_to_distance_cm_backward_MAG(float target_cm, int base_pwm)
+{
+    // --- Static variables persist across loop calls ---
+    static float heading_integral_bwd = 0.0f;
+    static float heading_last_error_bwd = 0.0f;
+    static float speed_integral_bwd = 0.0f;
+    static float speed_last_error_bwd = 0.0f;
+    static float fused_heading_bwd = 0.0f;    // <-- fused heading
+    static uint32_t last_time_bwd = 0;
+    static int32_t prev_left_counts_bwd = 0;
+    static int32_t prev_right_counts_bwd = 0;
+
+    // --- One-time initialization ---
+    static bool initialized_bwd = false;
+    if (!initialized_bwd) {
+        heading_integral_bwd = 0.0f;
+        heading_last_error_bwd = 0.0f;
+        speed_integral_bwd = 0.0f;
+        speed_last_error_bwd = 0.0f;
+        fused_heading_bwd = 0.0f;
+
+        last_time_bwd = HAL_GetTick();
+        prev_left_counts_bwd = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+        prev_right_counts_bwd = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
+        initialized_bwd = true;
+    }
+
+    // --- Reset encoder counts ---
+    int32_t start_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+    float travelled_cm = 0.0f;
+
+    // --- PID gains ---
+    float Kp_h = 40.0f, Ki_h = 5.0f, Kd_h = 3.5f;
+    float Kp_e = 0.5f, Ki_e = 0.04f, Kd_e = 0.1f;
+
+    char buf[50];
+
+    while (1)
+    {
+        int32_t cur_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+        int32_t diff = cur_pos - start_pos;
+        travelled_cm = counts_to_cm(abs(diff));
+        float remaining = target_cm - travelled_cm;
+
+        if (remaining <= 1.0f) {  // tolerance
+            Motor_stop();
+            initialized_bwd = false;
+            break;
+        }
+
+        // --- Δt calculation ---
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time_bwd) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time_bwd = now;
+
+        // --- Read calibrated magnetometer ---
+        int16_t mx_raw, my_raw, mz_raw;
+        ICM20948_ReadMagRaw(&mx_raw, &my_raw, &mz_raw);
+
+        float mx = (float)mx_raw;
+        float my = (float)my_raw;
+        float mz = (float)mz_raw;
+        apply_mag_calibration(&mx, &my, &mz);
+
+        // --- Read gyro ---
+        int16_t gz_raw;
+        ICM20948_ReadRaw(NULL, NULL, NULL, NULL, NULL, &gz_raw);
+        float gz_dps = ((float)gz_raw / 131.0f) - gyro_bias;
+
+        // --- Complementary filter ---
+        float mag_heading = atan2f(my, mx);   // radians
+        fused_heading_bwd += gz_dps * (3.14159265f / 180.0f) * dt; // gyro integration
+        float alpha = 0.98f;
+        fused_heading_bwd = alpha*fused_heading_bwd + (1.0f-alpha)*mag_heading;
+
+        if (fused_heading_bwd > 3.14159265f) fused_heading_bwd -= 2.0f*3.14159265f;
+        if (fused_heading_bwd < -3.14159265f) fused_heading_bwd += 2.0f*3.14159265f;
+
+        // --- Heading PID ---
+        float heading_error = 0.0f - fused_heading_bwd;  // target is straight
+        heading_integral_bwd += heading_error * dt;
+        float heading_derivative = (heading_error - heading_last_error_bwd) / dt;
+        heading_last_error_bwd = heading_error;
+        float gyro_correction = Kp_h*heading_error + Ki_h*heading_integral_bwd + Kd_h*heading_derivative;
+
+        // --- Encoder PID ---
+        int32_t left_counts  = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+        int32_t right_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
+        int32_t left_delta  = left_counts - prev_left_counts_bwd;
+        int32_t right_delta = right_counts - prev_right_counts_bwd;
+        prev_left_counts_bwd  = left_counts;
+        prev_right_counts_bwd = right_counts;
+
+        float speed_error = (float)(left_delta - right_delta);
+        speed_integral_bwd += speed_error * dt;
+        float speed_derivative = (speed_error - speed_last_error_bwd) / dt;
+        speed_last_error_bwd = speed_error;
+        float encoder_correction = Kp_e*speed_error + Ki_e*speed_integral_bwd + Kd_e*speed_derivative;
+
+        // --- PWM scaling ---
+        int pwm_backward = base_pwm;
+        if (remaining < 5.0f) pwm_backward = (int)(0.6f*base_pwm);
+        if (remaining < 1.0f) pwm_backward = pwmMin + 60;
+
+        // --- Apply corrections ---
+        int left_pwm  = pwm_backward + (int)(0.7*gyro_correction + 0.3*encoder_correction);
+        int right_pwm = pwm_backward + (int)(-0.7*gyro_correction - 0.3*encoder_correction);
+
+        if (left_pwm > pwmMax) left_pwm = pwmMax;
+        if (left_pwm < pwmMin) left_pwm = pwmMin;
+        if (right_pwm > pwmMax) right_pwm = pwmMax;
+        if (right_pwm < pwmMin) right_pwm = pwmMin;
+
+        if (heading_integral_bwd > 100) heading_integral_bwd = 100;
+        if (heading_integral_bwd < -100) heading_integral_bwd = -100;
+        if (speed_integral_bwd > 50) speed_integral_bwd = 50;
+        if (speed_integral_bwd < -50) speed_integral_bwd = -50;
+
+        Motor_set_pwm_reverse(left_pwm, right_pwm);
+
+        // --- Optional OLED updates ---
+        OLED_Clear();
+        sprintf(buf, "Target: %.1fcm", target_cm);
+        OLED_ShowString(0, 0, (uint8_t *)buf);
+        sprintf(buf, "Travel: %.1fcm", travelled_cm);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+        float left_rpm = (abs(left_delta)/COUNTS_PER_REV)/dt*60.0f;
+        float right_rpm = (abs(right_delta)/COUNTS_PER_REV)/dt*60.0f;
+        sprintf(buf, "L: %.1f", left_rpm);
+        OLED_ShowString(0, 40, (uint8_t *)buf);
+        sprintf(buf, "R: %.1f", right_rpm);
+        OLED_ShowString(60, 40, (uint8_t *)buf);
+        OLED_Refresh_Gram();
+
+        HAL_Delay(10);
+    }
+
+    // --- Final display ---
+    OLED_Clear();
+    sprintf(buf, "Target: %.1fcm", target_cm);
+    OLED_ShowString(0, 0, (uint8_t *)buf);
+    sprintf(buf, "Travel: %.1fcm", travelled_cm);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    float err_pct = (travelled_cm - target_cm)/target_cm*100.0f;
+    sprintf(buf, "Error: %.1f%%", err_pct);
+    OLED_ShowString(0, 40, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+}
+
+
 /**
  * @brief Moves the robot straight backward for a target distance using cascaded PID control.
  * @param target_cm The total distance (in cm) the robot should travel backward.
@@ -425,8 +586,8 @@ void run_straight_to_distance_cm_backward(float target_cm, int base_pwm)
 
         // Gemini Input, reverse signs for reverse directed drift
         // Suggested fix: Signs of gyro_correction flipped for backward steering logic
-        int left_pwm  = pwm_backward + (int)( 0.6 * gyro_correction + 0.4 * encoder_correction);  // Added correction (slowing down left in reverse)
-        int right_pwm = pwm_backward + (int)(-0.6 * gyro_correction - 0.4 * encoder_correction); // Subtracted correction (speeding up right in reverse)
+        int left_pwm  = pwm_backward + (int)( 0.7 * gyro_correction + 0.3 * encoder_correction);  // Added correction (slowing down left in reverse)
+        int right_pwm = pwm_backward + (int)(-0.7 * gyro_correction - 0.3 * encoder_correction); // Subtracted correction (speeding up right in reverse)
 
         // --- Clamp PWM ---
         // Ensure the magnitude of PWM stays within the allowed range
@@ -503,6 +664,160 @@ void Motor_set_pwm_reverse(int left_pwm, int right_pwm)
     __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, 0);
 }
 
+void run_straight_to_distance_cm_MAG(float target_cm, int base_pwm)
+{
+    // --- Static variables persist across loop calls ---
+    static float heading_integral = 0.0f;
+    static float heading_last_error = 0.0f;
+    static float speed_integral = 0.0f;
+    static float speed_last_error = 0.0f;
+    static float fused_heading = 0.0f;  // fused heading with gyro+mag
+    static uint32_t last_time = 0;
+    static int32_t prev_left_counts = 0;
+    static int32_t prev_right_counts = 0;
+
+    // --- One-time initialization ---
+    static bool initialized = false;
+    if (!initialized) {
+        heading_integral = 0.0f;
+        heading_last_error = 0.0f;
+        speed_integral = 0.0f;
+        speed_last_error = 0.0f;
+        fused_heading = 0.0f;
+
+        last_time = HAL_GetTick();
+        prev_left_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+        prev_right_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
+        initialized = true;
+    }
+
+    int32_t start_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+    float travelled_cm = 0.0f;
+
+    const float tol_cm = 1.0f;
+    const float slow_down_cm = 5.0f;
+    const float creep_cm = 1.0f;
+
+    float Kp_h = 40.0f, Ki_h = 5.0f, Kd_h = 3.5f;
+    float Kp_e = 0.5f, Ki_e = 0.04f, Kd_e = 0.1f;
+
+    char buf[50];
+
+    while (1) {
+        int32_t cur_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+        int32_t diff = cur_pos - start_pos;
+        travelled_cm = counts_to_cm(abs(diff));
+        float remaining = target_cm - travelled_cm;
+
+        if (remaining <= tol_cm) {
+            Motor_stop();
+            initialized = false;
+            break;
+        }
+
+        // --- Δt calculation ---
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time = now;
+
+        // --- Read calibrated magnetometer ---
+        int16_t mx_raw, my_raw, mz_raw;
+        ICM20948_ReadMagRaw(&mx_raw, &my_raw, &mz_raw);
+        float mx = (float)mx_raw;
+        float my = (float)my_raw;
+        float mz = (float)mz_raw;
+        apply_mag_calibration(&mx, &my, &mz);
+
+        // --- Read gyro ---
+        int16_t gz_raw;
+        ICM20948_ReadRaw(NULL, NULL, NULL, NULL, NULL, &gz_raw);
+        float gz_dps = ((float)gz_raw / 131.0f) - gyro_bias;
+
+        // --- Complementary filter ---
+        float mag_heading = atan2f(my, mx);  // radians
+        fused_heading += gz_dps * (3.14159265f / 180.0f) * dt; // gyro integration
+        float alpha = 0.98f;
+        fused_heading = alpha * fused_heading + (1.0f - alpha) * mag_heading;
+
+        if (fused_heading > 3.14159265f) fused_heading -= 2.0f * 3.14159265f;
+        if (fused_heading < -3.14159265f) fused_heading += 2.0f * 3.14159265f;
+
+        // --- Heading PID ---
+        float heading_error = 0.0f - fused_heading;
+        heading_integral += heading_error * dt;
+        float heading_derivative = (heading_error - heading_last_error) / dt;
+        heading_last_error = heading_error;
+        float gyro_correction = Kp_h * heading_error + Ki_h * heading_integral + Kd_h * heading_derivative;
+
+        // --- Encoder PID ---
+        int32_t left_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+        int32_t right_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
+        int32_t left_delta = left_counts - prev_left_counts;
+        int32_t right_delta = right_counts - prev_right_counts;
+        prev_left_counts = left_counts;
+        prev_right_counts = right_counts;
+
+        float speed_error = (float)(left_delta - right_delta);
+        speed_integral += speed_error * dt;
+        float speed_derivative = (speed_error - speed_last_error) / dt;
+        speed_last_error = speed_error;
+        float encoder_correction = Kp_e * speed_error + Ki_e * speed_integral + Kd_e * speed_derivative;
+
+        // --- PWM scaling ---
+        int pwm_forward = base_pwm;
+        if (remaining < slow_down_cm) pwm_forward = (int)(0.6f * base_pwm);
+        if (remaining < creep_cm) pwm_forward = pwmMin + 60;
+
+        // --- Apply corrections ---
+        int left_pwm = pwm_forward + (int)(0.7 * gyro_correction - 0.3 * encoder_correction);
+        int right_pwm = pwm_forward + (int)(-0.7 * gyro_correction + 0.3 * encoder_correction);
+
+        // --- Clamp PWM ---
+        if (left_pwm > pwmMax) left_pwm = pwmMax;
+        if (left_pwm < pwmMin) left_pwm = pwmMin;
+        if (right_pwm > pwmMax) right_pwm = pwmMax;
+        if (right_pwm < pwmMin) right_pwm = pwmMin;
+
+        if (heading_integral > 500) heading_integral = 500;
+        if (heading_integral < -500) heading_integral = -500;
+        if (speed_integral > 50) speed_integral = 50;
+        if (speed_integral < -50) speed_integral = -50;
+
+        Motor_set_pwm(left_pwm, right_pwm);
+
+        // --- Optional OLED updates ---
+        OLED_Clear();
+        sprintf(buf, "Target: %.1fcm", target_cm);
+        OLED_ShowString(0, 0, (uint8_t *)buf);
+        sprintf(buf, "Travel: %.1fcm", travelled_cm);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+
+        float left_rpm = (abs(left_delta) / COUNTS_PER_REV) / dt * 60.0f;
+        float right_rpm = (abs(right_delta) / COUNTS_PER_REV) / dt * 60.0f;
+        sprintf(buf, "L: %.1f", left_rpm);
+        OLED_ShowString(0, 40, (uint8_t *)buf);
+        sprintf(buf, "R: %.1f", right_rpm);
+        OLED_ShowString(60, 40, (uint8_t *)buf);
+        OLED_Refresh_Gram();
+
+        HAL_Delay(10);
+    }
+
+    // --- Final OLED display ---
+    OLED_Clear();
+    sprintf(buf, "Target: %.1fcm", target_cm);
+    OLED_ShowString(0, 0, (uint8_t *)buf);
+    sprintf(buf, "Travel: %.1fcm", travelled_cm);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    float err_pct = (travelled_cm - target_cm) / target_cm * 100.0f;
+    sprintf(buf, "Error: %.1f%%", err_pct);
+    OLED_ShowString(0, 40, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+}
+
+
+
 
 void run_straight_to_distance_cm(float target_cm, int base_pwm)
 {
@@ -553,6 +868,7 @@ void run_straight_to_distance_cm(float target_cm, int base_pwm)
     float Kd_e = 0.1f;
 
     char buf[50];
+    float heading = 0.0f;
 
     while (1)
     {
@@ -580,7 +896,6 @@ void run_straight_to_distance_cm(float target_cm, int base_pwm)
         ICM20948_ReadRaw(NULL, NULL, NULL, NULL, NULL, &gz_raw);
         float gz_dps = gz_raw / 131.0f - gyro_bias;
         gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
-        float heading = 0.0f;
         heading += gz_filtered * dt;
 
         float heading_error = 0.0f - heading;
@@ -613,8 +928,8 @@ void run_straight_to_distance_cm(float target_cm, int base_pwm)
         if (remaining < creep_cm) pwm_forward = pwmMin + 60;
 
         // --- Apply Corrections ---
-        int left_pwm  = pwm_forward + (int)(0.8 * gyro_correction - 0.2 * encoder_correction);
-        int right_pwm = pwm_forward + (int)(-0.8 * gyro_correction + 0.2 * encoder_correction);
+        int left_pwm  = pwm_forward + (int)(0.7 * gyro_correction - 0.3 * encoder_correction);
+        int right_pwm = pwm_forward + (int)(-0.7 * gyro_correction + 0.3 * encoder_correction);
 
         // --- Clamp PWM ---
         if (left_pwm > pwmMax) left_pwm = pwmMax;
@@ -944,18 +1259,18 @@ void Execute_Command(Command_t *cmd)
             distance = (uint16_t)atoi(distance_str);
         }
 
-        char debug_msg[30];
-        sprintf(debug_msg, "CMD: %s D:%u", cmd->buffer, distance);
-        OLED_ShowString(0,0, debug_msg);
-        OLED_Refresh_Gram();
+//        char debug_msg[30];
+//        sprintf(debug_msg, "CMD: %s D:%u", cmd->buffer, distance);
+//        OLED_ShowString(0,0, debug_msg);
+//        OLED_Refresh_Gram();
 
         if (strncmp(cmd->buffer, "fw", 2) == 0)
         {
-            run_straight_to_distance_cm(distance,3000);
+            run_straight_to_distance_cm_MAG(distance,3000);
         }
         else // Must be "bw"
         {
-            run_straight_to_distance_cm_backward(distance,3000);
+            run_straight_to_distance_cm_backward_MAG(distance,3000);
         }
     }
     // -----------------------------------------------------------
@@ -1380,9 +1695,43 @@ void ICM20948_ReadMagRaw(int16_t *mx, int16_t *my, int16_t *mz)
     ICM20948_ReadRegs(0, ICM_REG_EXT_SENS_DATA_00, d, 8);
 
     // Combine bytes and subtract bias properly
-    *mx = ((int16_t)((d[1] << 8) | d[0])) - MAG_BIAS_X; // X-axis
-    *my = ((int16_t)((d[3] << 8) | d[2])) - MAG_BIAS_Y; // Y-axis
-    *mz = ((int16_t)((d[5] << 8) | d[4])) - MAG_BIAS_Z; // Z-axis
+    *mx = ((int16_t)((d[1] << 8) | d[0])); // X-axis
+    *my = ((int16_t)((d[3] << 8) | d[2])); // Y-axis
+    *mz = ((int16_t)((d[5] << 8) | d[4])); // Z-axis
+}
+
+void apply_mag_calibration(float *mx, float *my, float *mz) {
+    float x = *mx - MAG_BIAS_X;
+    float y = *my - MAG_BIAS_Y;
+    float z = *mz - MAG_BIAS_Z;
+
+    *mx = MAG_SOFT[0][0]*x + MAG_SOFT[0][1]*y + MAG_SOFT[0][2]*z;
+    *my = MAG_SOFT[1][0]*x + MAG_SOFT[1][1]*y + MAG_SOFT[1][2]*z;
+    *mz = MAG_SOFT[2][0]*x + MAG_SOFT[2][1]*y + MAG_SOFT[2][2]*z;
+}
+
+float get_mag_heading(float mx, float my) {
+    return atan2f(my, mx); // radians
+}
+
+float complementary_heading(float gyro_dps, float mag_heading, float dt) {
+    static float heading = 0.0f;  // persistent
+
+    // Convert gyro to rad/s
+    float gyro_rad = gyro_dps * (3.14159265f / 180.0f);
+
+    // Integrate gyro
+    heading += gyro_rad * dt;
+
+    // Complementary filter: 0.98 gyro, 0.02 mag
+    float alpha = 0.98f;
+    heading = alpha*heading + (1.0f - alpha)*mag_heading;
+
+    // Keep heading in [-pi, pi]
+    if (heading > 3.14159265f) heading -= 2.0f*3.14159265f;
+    if (heading < -3.14159265f) heading += 2.0f*3.14159265f;
+
+    return heading;
 }
 
 
@@ -1530,91 +1879,91 @@ void orbit(float target_angle, int base_pwm, float steer_angle){
   * @retval int
   */
 
-void Mag_Calibrate(void)
-{
-    int16_t mx, my, mz;
-
-    // Initialize min/max values to extreme opposites
-    int16_t x_min = INT16_MAX, x_max = INT16_MIN;
-    int16_t y_min = INT16_MAX, y_max = INT16_MIN;
-    int16_t z_min = INT16_MAX, z_max = INT16_MIN;
-
-    const uint32_t CALIBRATION_DURATION_MS = 20000; // 20 seconds
-    uint32_t start_time = HAL_GetTick();
-
-    OLED_Clear();
-    OLED_ShowString(0, 0, (uint8_t*)"MAG CALIBRATION");
-    OLED_ShowString(0, 1, (uint8_t*)"Rotate 360 deg.");
-    OLED_ShowString(0, 2, (uint8_t*)"in ALL planes");
-    OLED_Refresh_Gram();
-    HAL_Delay(2000);
-
-    OLED_Clear();
-    OLED_ShowString(0, 0, (uint8_t*)"CALIBRATING...");
-    OLED_ShowString(0, 1, (uint8_t*)"Rotate car slowly");
-
-    while (HAL_GetTick() - start_time < CALIBRATION_DURATION_MS)
-    {
-        // Read raw data from the magnetometer
-        ICM20948_ReadMagRaw(&mx, &my, &mz);
-
-        // Update min/max for X-axis
-        if (mx > x_max) x_max = mx;
-        if (mx < x_min) x_min = mx;
-
-        // Update min/max for Y-axis
-        if (my > y_max) y_max = my;
-        if (my < y_min) y_min = my;
-
-        // Update min/max for Z-axis
-        if (mz > z_max) z_max = mz;
-        if (mz < z_min) z_min = mz;
-
-        // Display progress
-        uint32_t elapsed = HAL_GetTick() - start_time;
-        int seconds_left = (CALIBRATION_DURATION_MS - elapsed) / 1000;
-
-        sprintf(buf, "Time left: %2d s", seconds_left);
-        OLED_ShowString(0, 10, (uint8_t*)buf);
-
-        sprintf(buf, "X Range: %d to %d", x_min, x_max);
-        OLED_ShowString(0, 30, (uint8_t*)buf);
-
-        sprintf(buf, "Y Range: %d to %d", y_min, y_max);
-        OLED_ShowString(0, 50, (uint8_t*)buf);
-
-        OLED_Refresh_Gram();
-        HAL_Delay(10); // Don't hog the CPU
-    }
-
-    // Calculation Phase
-    MAG_BIAS_X = (x_max + x_min) / 2;
-    MAG_BIAS_Y = (y_max + y_min) / 2;
-    MAG_BIAS_Z = (z_max + z_min) / 2; // Z is calculated, but X/Y are most critical for Yaw
-
-    // Display Results
-    OLED_Clear();
-    OLED_ShowString(0, 0, (uint8_t*)"CALIBRATION COMPLETE!");
-
-    sprintf(buf, "X Bias: %d", MAG_BIAS_X);
-    OLED_ShowString(0, 10, (uint8_t*)buf);
-    //HAL_UART_Transmit(&huart3, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
-    //HAL_Delay(50); // 20 Hz sampling
-
-    sprintf(buf, "Y Bias: %d", MAG_BIAS_Y);
-    OLED_ShowString(0, 30, (uint8_t*)buf);
-    //HAL_UART_Transmit(&huart3, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
-    //HAL_Delay(50); // 20 Hz sampling
-
-    sprintf(buf, "Z Bias: %d", MAG_BIAS_Z);
-    OLED_ShowString(0, 50, (uint8_t*)buf);
-//    HAL_UART_Transmit(&huart3, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
-//    HAL_Delay(50); // 20 Hz sampling
-
-    //OLED_ShowString(0, 70, (uint8_t*)"Update MAG_BIAS_X/Y/Z");
-    OLED_Refresh_Gram();
-    HAL_Delay(10000); // Display results for 5 seconds
-}
+//void Mag_Calibrate(void)
+//{
+//    int16_t mx, my, mz;
+//
+//    // Initialize min/max values to extreme opposites
+//    int16_t x_min = INT16_MAX, x_max = INT16_MIN;
+//    int16_t y_min = INT16_MAX, y_max = INT16_MIN;
+//    int16_t z_min = INT16_MAX, z_max = INT16_MIN;
+//
+//    const uint32_t CALIBRATION_DURATION_MS = 20000; // 20 seconds
+//    uint32_t start_time = HAL_GetTick();
+//
+//    OLED_Clear();
+//    OLED_ShowString(0, 0, (uint8_t*)"MAG CALIBRATION");
+//    OLED_ShowString(0, 1, (uint8_t*)"Rotate 360 deg.");
+//    OLED_ShowString(0, 2, (uint8_t*)"in ALL planes");
+//    OLED_Refresh_Gram();
+//    HAL_Delay(2000);
+//
+//    OLED_Clear();
+//    OLED_ShowString(0, 0, (uint8_t*)"CALIBRATING...");
+//    OLED_ShowString(0, 1, (uint8_t*)"Rotate car slowly");
+//
+//    while (HAL_GetTick() - start_time < CALIBRATION_DURATION_MS)
+//    {
+//        // Read raw data from the magnetometer
+//        ICM20948_ReadMagRaw(&mx, &my, &mz);
+//
+//        // Update min/max for X-axis
+//        if (mx > x_max) x_max = mx;
+//        if (mx < x_min) x_min = mx;
+//
+//        // Update min/max for Y-axis
+//        if (my > y_max) y_max = my;
+//        if (my < y_min) y_min = my;
+//
+//        // Update min/max for Z-axis
+//        if (mz > z_max) z_max = mz;
+//        if (mz < z_min) z_min = mz;
+//
+//        // Display progress
+//        uint32_t elapsed = HAL_GetTick() - start_time;
+//        int seconds_left = (CALIBRATION_DURATION_MS - elapsed) / 1000;
+//
+//        sprintf(buf, "Time left: %2d s", seconds_left);
+//        OLED_ShowString(0, 10, (uint8_t*)buf);
+//
+//        sprintf(buf, "X Range: %d to %d", x_min, x_max);
+//        OLED_ShowString(0, 30, (uint8_t*)buf);
+//
+//        sprintf(buf, "Y Range: %d to %d", y_min, y_max);
+//        OLED_ShowString(0, 50, (uint8_t*)buf);
+//
+//        OLED_Refresh_Gram();
+//        HAL_Delay(10); // Don't hog the CPU
+//    }
+//
+//    // Calculation Phase
+//    MAG_BIAS_X = (x_max + x_min) / 2;
+//    MAG_BIAS_Y = (y_max + y_min) / 2;
+//    MAG_BIAS_Z = (z_max + z_min) / 2; // Z is calculated, but X/Y are most critical for Yaw
+//
+//    // Display Results
+//    OLED_Clear();
+//    OLED_ShowString(0, 0, (uint8_t*)"CALIBRATION COMPLETE!");
+//
+//    sprintf(buf, "X Bias: %d", MAG_BIAS_X);
+//    OLED_ShowString(0, 10, (uint8_t*)buf);
+//    //HAL_UART_Transmit(&huart3, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+//    //HAL_Delay(50); // 20 Hz sampling
+//
+//    sprintf(buf, "Y Bias: %d", MAG_BIAS_Y);
+//    OLED_ShowString(0, 30, (uint8_t*)buf);
+//    //HAL_UART_Transmit(&huart3, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+//    //HAL_Delay(50); // 20 Hz sampling
+//
+//    sprintf(buf, "Z Bias: %d", MAG_BIAS_Z);
+//    OLED_ShowString(0, 50, (uint8_t*)buf);
+////    HAL_UART_Transmit(&huart3, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+////    HAL_Delay(50); // 20 Hz sampling
+//
+//    //OLED_ShowString(0, 70, (uint8_t*)"Update MAG_BIAS_X/Y/Z");
+//    OLED_Refresh_Gram();
+//    HAL_Delay(10000); // Display results for 5 seconds
+//}
 
 void log_magnetometer_data(void) {
 	int16_t mx, my, mz;
@@ -1835,12 +2184,12 @@ int main(void)
   OLED_Clear();
 */
   OLED_Clear();
-  Motor_forward(3000);
-  Mag_Calibrate();
-  log_magnetometer_data();
+  //Motor_forward(3000);
+  //Mag_Calibrate();
+  //log_magnetometer_data();
 
   while (1) {
-/*
+
 	  Command_t next_command;
 	  if (Queue_Dequeue(&next_command))
 	  {
@@ -1889,7 +2238,7 @@ int main(void)
     HAL_GPIO_TogglePin(GPIOA, LED_Pin);
     HAL_Delay(500);
 
-
+/*
         raw4 = adc_read_channel(&hadc1, ADC_CHANNEL_4);
         mv4  = (uint32_t)raw4 * 3300u / 4095u;
         dist4 = dist_cm_from_mv_4(mv4);
