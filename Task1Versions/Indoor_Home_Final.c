@@ -1174,7 +1174,7 @@ void pivot_turn_90_degrees_left()
     uint32_t last_time = HAL_GetTick();
 
     const float PIVOT_TARGET_ANGLE = 90.0f; // Target Angle
-    const int PIVOT_PWM = 4500;              // Very light PWM for light turning
+    const int PIVOT_PWM = 4400;  //4500            // Very light PWM for light turning
     const int TURN_DELAY_MS = 0;           // Duration of the brief turn pulse
 
     int left_pwm, right_pwm;
@@ -1335,7 +1335,7 @@ void pivot_turn_90_degrees_right()
     uint32_t last_time = HAL_GetTick();
 
     const float PIVOT_TARGET_ANGLE = 90.0f; // Target Angle
-    const int PIVOT_PWM = 3000;              // Very light PWM for light turning
+    const int PIVOT_PWM = 2780; //3000;              // Very light PWM for light turning
     const int TURN_DELAY_MS = 0;           // Duration of the brief turn pulse
 
     int left_pwm, right_pwm;
