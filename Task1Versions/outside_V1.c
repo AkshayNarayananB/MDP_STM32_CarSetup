@@ -286,22 +286,75 @@ static void Motor_set_right_pwm(int pwm, int direction)
     }
 }
 
+//static void Motor_set_pwm(int left_pwm, int right_pwm)
+//{
+//  // Clamp to valid PWM range
+//  if (left_pwm > pwmMax)  left_pwm = pwmMax;
+//  if (left_pwm < pwmMin)  left_pwm = pwmMin;
+//  if (right_pwm > pwmMax) right_pwm = pwmMax;
+//  if (right_pwm < pwmMin) right_pwm = pwmMin;
+//
+//  // Left motor (TIM4, CH3/CH4)
+//  __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_3, left_pwm);
+//  __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_4, 0);
+//
+//  // Right motor (TIM1, CH3/CH4)
+//  __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_3, 0);
+//  __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, right_pwm);
+//}
+
+
 static void Motor_set_pwm(int left_pwm, int right_pwm)
 {
-  // Clamp to valid PWM range
-  if (left_pwm > pwmMax)  left_pwm = pwmMax;
-  if (left_pwm < pwmMin)  left_pwm = pwmMin;
-  if (right_pwm > pwmMax) right_pwm = pwmMax;
-  if (right_pwm < pwmMin) right_pwm = pwmMin;
+    // --- Left Motor Logic (TIM4, CH3/CH4) ---
+    int left_magnitude = abs(left_pwm);
 
-  // Left motor (TIM4, CH3/CH4)
-  __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_3, left_pwm);
-  __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_4, 0);
+    // Clamp the magnitude to the valid PWM range [pwmMin, pwmMax]
+    if (left_magnitude > pwmMax) left_magnitude = pwmMax;
+    // Assuming pwmMin is typically 0 for the magnitude of the signal
+    if (left_magnitude < pwmMin) left_magnitude = pwmMin;
 
-  // Right motor (TIM1, CH3/CH4)
-  __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_3, 0);
-  __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, right_pwm);
+    // Determine direction based on sign of left_pwm
+    if (left_pwm > 0) {
+        // Forward: CH3 (A) = PWM, CH4 (B) = 0
+        __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_3, left_magnitude);
+        __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_4, 0);
+    } else if (left_pwm < 0) {
+        // Reverse: CH3 (A) = 0, CH4 (B) = PWM
+        __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_3, 0);
+        __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_4, left_magnitude);
+    } else {
+        // Stop
+        __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_3, 0);
+        __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_4, 0);
+    }
+
+
+    // --- Right Motor Logic (TIM1, CH3/CH4) ---
+    int right_magnitude = abs(right_pwm);
+
+    // Clamp the magnitude to the valid PWM range [pwmMin, pwmMax]
+    if (right_magnitude > pwmMax) right_magnitude = pwmMax;
+    // Assuming pwmMin is typically 0 for the magnitude of the signal
+    if (right_magnitude < pwmMin) right_magnitude = pwmMin;
+
+    // Determine direction based on sign of right_pwm
+    if (right_pwm > 0) {
+        // Forward: CH3 (A) = 0, CH4 (B) = PWM (based on your provided example)
+        __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_3, 0);
+        __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, right_magnitude);
+    } else if (right_pwm < 0) {
+        // Reverse: CH3 (A) = PWM, CH4 (B) = 0 (based on your provided example)
+        __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_3, right_magnitude);
+        __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, 0);
+    } else {
+        // Stop
+        __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_3, 0);
+        __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, 0);
+    }
 }
+
+
 
 void Motor_forward_reset(void)
 {
@@ -1087,6 +1140,59 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
     OLED_Refresh_Gram();
 }
 
+void pivot_turn_90_degrees_left()
+{
+    int left_pwm, right_pwm;
+    float heading = 0.0f;
+    float gz_filtered = 0.0f;
+    uint32_t last_time = HAL_GetTick();
+
+    // Raw sensor variables for reading
+    int16_t ax, ay, az, gx, gy, gz;
+    float gz_dps;
+
+    const float PIVOT_TARGET_ANGLE = 10.0f; // Added 'f' for float literal
+    const int PIVOT_PWM = 2500;             // Fixed PWM for the pivot turn
+
+	right_pwm = PIVOT_PWM; // Negative for reverse
+	left_pwm = -PIVOT_PWM;   // Positive for forward
+
+    Motor_set_pwm(left_pwm, right_pwm);
+    HAL_Delay(700); // Pause to ensure full stop/settling time
+    Motor_stop(); // Already called in the loop
+
+    Steering_ToUS(0.0); // Ensure steering is neutral
+    HAL_Delay(500); // Wait for physical movement to stop
+}
+
+
+
+void pivot_turn_90_degrees_right()
+{
+    int left_pwm, right_pwm;
+    float heading = 0.0f;
+    float gz_filtered = 0.0f;
+    uint32_t last_time = HAL_GetTick();
+
+    // Raw sensor variables for reading
+    int16_t ax, ay, az, gx, gy, gz;
+    float gz_dps;
+
+    const float PIVOT_TARGET_ANGLE = 10.0f; // Added 'f' for float literal
+    const int PIVOT_PWM = 2500;             // Fixed PWM for the pivot turn
+
+	right_pwm = -PIVOT_PWM; // Negative for reverse
+	left_pwm = PIVOT_PWM;   // Positive for forward
+
+    Motor_set_pwm(left_pwm, right_pwm);
+    HAL_Delay(700); // Pause to ensure full stop/settling time
+    Motor_stop(); // Already called in the loop
+
+    Steering_ToUS(0.0); // Ensure steering is neutral
+    HAL_Delay(500); // Wait for physical movement to stop
+}
+
+
 void turn_by_angle_degrees_ONE(float target_angle, int base_pwm, float steer_angle)
 {
     // --- PID and state variables ---
@@ -1521,10 +1627,10 @@ void Execute_Command(Command_t *cmd)
         turn_by_angle_degrees_backwards(23.25, 2000, 20.0); //right backward
     }
     else if (strcmp(cmd->buffer, "rhtof") == 0){
-        turn_by_angle_degrees_ONE(25.25, 2000, 20.0); //left smaller radius
+        turn_by_angle_degrees_ONE(33.5, 2000, 20.0); //left smaller radius
     }
     else if (strcmp(cmd->buffer, "rhtob") == 0){
-        turn_by_angle_degrees_backwards_ONE(25.25, 2000, 20.0); //left smaller radius
+        turn_by_angle_degrees_backwards_ONE(33.5, 2000, 20.0); //left smaller radius
     }
     else if (strcmp(cmd->buffer, "lftfw") == 0)
     {
@@ -1535,10 +1641,10 @@ void Execute_Command(Command_t *cmd)
   	  turn_by_angle_degrees_backwards(-15.25, 2000, -18.0); //back left
     }
     else if (strcmp(cmd->buffer, "lftof") == 0){
-    	turn_by_angle_degrees_ONE(-25.25, 2000, 20.0); //left smaller radius
+    	turn_by_angle_degrees_ONE(-33.25, 2000, 20.0); //left smaller radius
     }
     else if (strcmp(cmd->buffer, "lftob") == 0){
-        turn_by_angle_degrees_backwards_ONE(-25.25, 2000, 20.0); //left smaller radius
+        turn_by_angle_degrees_backwards_ONE(-33.25, 2000, 20.0); //left smaller radius
     }
     else if (strcmp(cmd->buffer, "SNAP_") == 0)
     {
@@ -1548,6 +1654,9 @@ void Execute_Command(Command_t *cmd)
     else if (strcmp(cmd->buffer, "rboot") == 0){
     	HAL_NVIC_SystemReset(); //system reset -> program starts again from main
     }
+    else if (strcmp(cmd->buffer, 'rhtpv') == 0){
+    	pivot_turn_90_degrees_right();
+    }
 
     // -----------------------------------------------------------
     // UNKNOWN COMMAND
@@ -1556,6 +1665,7 @@ void Execute_Command(Command_t *cmd)
     {
         // Optionally, handle unknown commands (e.g., log an error)
     }
+
 }
 
 /**
@@ -2320,13 +2430,12 @@ int main(void)
   //Motor_forward(3000);
   //Servo_WriteUS(2400); HAL_Delay(1000);  // right
 
-//  Steering_ToUS(-45);HAL_Delay(800);
-//  Steering_ToUS(-25);HAL_Delay(800);
-//  Steering_ToUS(-10);HAL_Delay(800);
-//  Steering_ToUS(0);HAL_Delay(800);
 //  Steering_ToUS(45);HAL_Delay(800);
 //  Steering_ToUS(25);HAL_Delay(800);
 //  Steering_ToUS(10);HAL_Delay(800);
+//  Steering_ToUS(0);HAL_Delay(800);
+//  Steering_ToUS(-45);HAL_Delay(800);
+//  Steering_ToUS(-25);HAL_Delay(800);
 //  Steering_ToUS(0);HAL_Delay(800);
 
 
@@ -2345,7 +2454,6 @@ int main(void)
   Queue_Init();
   HAL_UART_Receive_IT(&huart3, (uint8_t*)rx_buffer, COMMAND_SIZE);
   HAL_TIM_IC_Start_IT(&htim3, TIM_CHANNEL_3);
-  Steering_ToUS(0);
 
 
   // --- Gyro warm-up (reduce jerk from bad first samples) ---
@@ -2366,6 +2474,13 @@ int main(void)
   }
   gyro_bias = gyro_bias_sum / num_cal_samples;
 
+  //__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 500);
+  //HAL_Delay(800);
+  //pivot_turn_90_degrees_right();
+
+  //__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 2400);
+  //HAL_Delay(800);
+  //pivot_turn_90_degrees_left();
   // -- Path Sample Functions -- //
 /*
   // -- Sample Path -- //
