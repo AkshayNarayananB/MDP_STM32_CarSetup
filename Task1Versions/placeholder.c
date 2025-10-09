@@ -33,8 +33,11 @@ float MAG_SOFT[3][3] = {
     { 2.35228020e-05, -1.10186884e-05,  3.69198217e-04 }
 };
 
-volatile float us_distance_cm = 999.0f;
-volatile bool distance_interrupt_triggered = false;
+volatile uint32_t IC_Val1 = 0;   // Stores the first capture (rising edge)
+volatile uint32_t IC_Val2 = 0;   // Stores the second capture (falling edge)
+volatile uint8_t Capture_Ready = 0; // Flag to indicate if capture is complete
+volatile uint8_t IC_State = 0;  // State machine: 0=wait_rising, 1=wait_falling
+volatile float us_distance_cm = 999.0f; // Global variable to hold the latest distancevolatile bool distance_interrupt_triggered = false;
 
 #define SAFE_DISTANCE_CM 24.0f // Interrupt threshold: 24 cm
 
@@ -79,7 +82,7 @@ uint16_t Steering_ToUS(int16_t steer_angle)
 
 /* USER CODE BEGIN 0 */
 #define COMMAND_SIZE 5
-#define QUEUE_DEPTH 10 // Max 10 commands waiting
+#define QUEUE_DEPTH 100 // Max 10 commands waiting
 
 // Command Structure
 typedef struct {
@@ -150,7 +153,6 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM8_Init(void);
 static void MX_TIM2_Init(void);
-static void MX_USART2_UART_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_I2C2_Init(void);
@@ -210,6 +212,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
   count = (int16_t)counter;
   position = count / 2; // x2 encoding
   angle = count / 2;    // x2 encoding
+
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
@@ -247,10 +250,10 @@ void MotorDrive_enable(void)
 void Motor_stop(void)
 {
   // Set both IN1 and IN2 pins = '1'
-  __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_3, pwmMax);
-  __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_4, pwmMax);
-  __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_3, pwmMax);
-  __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, pwmMax);
+  __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_3, 7500);
+  __HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_4, 7500);
+  __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_3, 7500);
+  __HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, 7500);
 }
 
 static void Motor_set_left_pwm(int pwm, int direction)
@@ -385,7 +388,7 @@ void run_straight_to_distance_cm_backward_MAG(float target_cm, int base_pwm)
         // --- Complementary filter ---
         float mag_heading = atan2f(my, mx);   // radians
         fused_heading_bwd += gz_dps * (3.14159265f / 180.0f) * dt; // gyro integration
-        float alpha = 0.98f;
+        float alpha = 0.95f;
         fused_heading_bwd = alpha*fused_heading_bwd + (1.0f-alpha)*mag_heading;
 
         if (fused_heading_bwd > 3.14159265f) fused_heading_bwd -= 2.0f*3.14159265f;
@@ -676,8 +679,12 @@ void run_straight_to_distance_cm_MAG(float target_cm, int base_pwm)
     static float speed_last_error = 0.0f;
     static float fused_heading = 0.0f;  // fused heading with gyro+mag
     static uint32_t last_time = 0;
+    /*
     static int32_t prev_left_counts = 0;
     static int32_t prev_right_counts = 0;
+    */
+    int32_t prev_left_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+    int32_t prev_right_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
 
     // --- One-time initialization ---
     static bool initialized = false;
@@ -1003,6 +1010,7 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
     float heading = 0.0f;
     float gz_filtered = 0.0f;
     uint32_t last_time = HAL_GetTick();
+    uint16_t dir = 0;
 
     // Raw sensor variables for reading
     int16_t ax, ay, az, gx, gy, gz;
@@ -1015,6 +1023,7 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
         steer_angle = -steer_angle;
     } else if (target_angle < 0 && steer_angle > 0) {
         steer_angle = -steer_angle;
+        dir = 1.0f;
     }
 
     // Ensure the steer_angle is within the safe range
@@ -1052,7 +1061,13 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
         if (fabs(heading) >= fabs(target_angle))
         {
             Motor_stop();
+            HAL_Delay(200);
             Steering_ToUS(0.0);
+            if(dir == 0){
+            	Steering_ToUS(-30.0);
+            	HAL_Delay(500);
+            	Steering_ToUS(0.0);
+            }
             break;
         }
 
@@ -1072,12 +1087,222 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
     OLED_Refresh_Gram();
 }
 
+void turn_by_angle_degrees_ONE(float target_angle, int base_pwm, float steer_angle)
+{
+    // --- PID and state variables ---
+    float heading = 0.0f;
+    float gz_filtered = 0.0f;
+    uint32_t last_time = HAL_GetTick();
+
+    // Raw sensor variables
+    int16_t ax, ay, az, gx, gy, gz;
+    float gz_dps;
+
+    // --- Determine direction ---
+    // target_angle > 0 → right turn
+    // target_angle < 0 → left turn
+    uint8_t turning_right = (target_angle > 0) ? 1 : 0;
+
+    // --- Ensure steer_angle matches direction ---
+    if (turning_right && steer_angle < 0) steer_angle = -steer_angle;
+    if (!turning_right && steer_angle > 0) steer_angle = -steer_angle;
+
+    // Clamp steering angle for safety
+    if (steer_angle > 45.0f) steer_angle = 45.0f;
+    if (steer_angle < -45.0f) steer_angle = -45.0f;
+
+    // --- Set steering ---
+    Steering_ToUS(steer_angle);
+
+    // --- Drive only one wheel depending on turn direction ---
+    if (turning_right)
+    {
+        // Right turn → spin left wheel only
+        Motor_set_pwm(base_pwm, 0);
+    }
+    else
+    {
+        // Left turn → spin right wheel only
+        Motor_set_pwm(0, base_pwm);
+    }
+
+    // --- Display target info ---
+    OLED_Clear();
+    char buf[32];
+    sprintf(buf, "Target: %.1f deg", target_angle);
+    OLED_ShowString(0, 0, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+
+    // --- Main loop ---
+    while (1)
+    {
+        // Read IMU
+        ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+        gz_dps = gz / 131.0f;
+
+        // Δt
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time = now;
+
+        // Filter and integrate
+        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+        heading += gz_filtered * dt;
+
+        // Check completion
+        if (fabs(heading) >= fabs(target_angle))
+        {
+            Motor_stop();
+            HAL_Delay(200);
+
+            // Return steering to neutral with brief counter turn
+            Steering_ToUS(0.0);
+
+            if (turning_right)
+            {
+                // If right turn, steer briefly left
+                Steering_ToUS(-30.0);
+            }
+            else
+            {
+                // If left turn, steer briefly right
+                Steering_ToUS(30.0);
+            }
+
+            HAL_Delay(500);
+            Steering_ToUS(0.0);
+            break;
+        }
+
+        // Display current heading
+        sprintf(buf, "Current: %.1f deg", heading);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+        OLED_Refresh_Gram();
+
+        HAL_Delay(10);
+    }
+
+    // --- Final OLED message ---
+    OLED_Clear();
+    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
+    sprintf(buf, "Final: %.1f deg", heading);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+}
+
+void turn_by_angle_degrees_backwards_ONE(float target_angle, int base_pwm, float steer_angle)
+{
+    // --- PID and state variables ---
+    float heading = 0.0f;
+    float gz_filtered = 0.0f;
+    uint32_t last_time = HAL_GetTick();
+
+    // Raw sensor variables
+    int16_t ax, ay, az, gx, gy, gz;
+    float gz_dps;
+
+    // --- Determine direction ---
+    // target_angle > 0 → right turn
+    // target_angle < 0 → left turn
+    uint8_t turning_right = (target_angle > 0) ? 1 : 0;
+
+    // --- Ensure steer_angle matches direction ---
+    if (turning_right && steer_angle < 0) steer_angle = -steer_angle;
+    if (!turning_right && steer_angle > 0) steer_angle = -steer_angle;
+
+    // Clamp steering angle for safety
+    if (steer_angle > 45.0f) steer_angle = 45.0f;
+    if (steer_angle < -45.0f) steer_angle = -45.0f;
+
+    // --- Set steering ---
+    Steering_ToUS(steer_angle);
+
+    // --- Drive only one wheel depending on turn direction ---
+    if (turning_right)
+    {
+        // Right turn → spin left wheel only
+    	Motor_set_pwm_reverse(base_pwm, 0);
+    }
+    else
+    {
+        // Left turn → spin right wheel only
+    	Motor_set_pwm_reverse(0, base_pwm);
+    }
+
+    // --- Display target info ---
+    OLED_Clear();
+    char buf[32];
+    sprintf(buf, "Target: %.1f deg", target_angle);
+    OLED_ShowString(0, 0, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+
+    // --- Main loop ---
+    while (1)
+    {
+        // Read IMU
+        ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+        gz_dps = gz / 131.0f;
+
+        // Δt
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time = now;
+
+        // Filter and integrate
+        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+        heading += gz_filtered * dt;
+
+        // Check completion
+        if (fabs(heading) >= fabs(target_angle))
+        {
+            Motor_stop();
+            HAL_Delay(200);
+
+            // Return steering to neutral with brief counter turn
+            Steering_ToUS(0.0);
+
+            if (turning_right)
+            {
+                // If right turn, steer briefly left
+                Steering_ToUS(-30.0);
+            }
+            else
+            {
+                // If left turn, steer briefly right
+                Steering_ToUS(30.0);
+            }
+
+            HAL_Delay(500);
+            Steering_ToUS(0.0);
+            break;
+        }
+
+        // Display current heading
+        sprintf(buf, "Current: %.1f deg", heading);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+        OLED_Refresh_Gram();
+
+        HAL_Delay(10);
+    }
+
+    // --- Final OLED message ---
+    OLED_Clear();
+    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
+    sprintf(buf, "Final: %.1f deg", heading);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+}
+
+
 void turn_by_angle_degrees_backwards(float target_angle, int base_pwm, float steer_angle)
 {
     // --- State Variables ---
     float heading = 0.0f;
     float gz_filtered = 0.0f;
     uint32_t last_time = HAL_GetTick();
+    uint16_t dir = 0;
 
     // Variable for impulse rejection (holds the last known good reading)
     static float gz_last_unbiased = 0.0f;
@@ -1104,6 +1329,7 @@ void turn_by_angle_degrees_backwards(float target_angle, int base_pwm, float ste
         steer_angle = -steer_angle;
     } else if (target_angle < 0 && steer_angle > 0) {
         steer_angle = -steer_angle;
+        dir = 1;
     }
     if (steer_angle > 45.0f) steer_angle = 45.0f;
     if (steer_angle < -45.0f) steer_angle = -45.0f;
@@ -1163,7 +1389,14 @@ void turn_by_angle_degrees_backwards(float target_angle, int base_pwm, float ste
         if (angle_left_to_turn <= COMPLETION_TOLERANCE)
         {
             Motor_stop();
+            HAL_Delay(200);
             Steering_ToUS(0.0);
+            if(dir == 0)
+            {
+             Steering_ToUS(-30.0);
+             HAL_Delay(500);
+             Steering_ToUS(0.0);
+            }
             break;
         }
 
@@ -1281,23 +1514,36 @@ void Execute_Command(Command_t *cmd)
     // -----------------------------------------------------------
     else if (strcmp(cmd->buffer, "rhtfw") == 0)
     {
-    	  turn_by_angle_degrees(33.25, 2000, 20.0); //right forward
+    	  turn_by_angle_degrees(25.25, 2000, 20.0); //right forward
     }
     else if (strcmp(cmd->buffer, "rhtbw") == 0)
     {
-        turn_by_angle_degrees_backwards(33.25, 2000, 20.0); //right backward
+        turn_by_angle_degrees_backwards(20.25, 2000, 20.0); //right backward
+    }
+    else if (strcmp(cmd->buffer, "rhtof") == 0){
+        turn_by_angle_degrees_ONE(25.25, 2000, 20.0); //left smaller radius
+    }
+    else if (strcmp(cmd->buffer, "rhtob") == 0){
+        turn_by_angle_degrees_backwards_ONE(25.25, 2000, 20.0); //left smaller radius
     }
     else if (strcmp(cmd->buffer, "lftfw") == 0)
     {
-    	  turn_by_angle_degrees(-33.25, 2000, 20.0); //left
+    	  turn_by_angle_degrees(-25.25, 2000, 20.0); //left
     }
     else if (strcmp(cmd->buffer, "lftbw") == 0)
     {
-  	  turn_by_angle_degrees_backwards(-30.25, 2000, -18.0); //back left
+  	  turn_by_angle_degrees_backwards(-15.25, 2000, -18.0); //back left
+    }
+    else if (strcmp(cmd->buffer, "lftof") == 0){
+    	turn_by_angle_degrees_ONE(-25.25, 2000, 20.0); //left smaller radius
+    }
+    else if (strcmp(cmd->buffer, "lftob") == 0){
+        turn_by_angle_degrees_backwards_ONE(-25.25, 2000, 20.0); //left smaller radius
     }
     else if (strcmp(cmd->buffer, "SNAP_") == 0)
     {
     	HAL_UART_Transmit_IT(&huart3, (uint8_t *)(cmd->buffer), 5); // SNAP
+    	HAL_Delay(2000);
     }
     else if (strcmp(cmd->buffer, "rboot") == 0){
     	HAL_NVIC_SystemReset(); //system reset -> program starts again from main
@@ -1743,58 +1989,6 @@ float complementary_heading(float gyro_dps, float mag_heading, float dt) {
 }
 
 
-
-// HCSR04 (Ultrasonic Sensor) Reading Function
-uint32_t HCSR04_Read(void)
-{
-    uint32_t start_tick, stop_tick, pulse_length;
-
-    // --- 1. Send 10 µs pulse on TRIG ---
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
-    for (volatile int i = 0; i < 300; i++); // ~10 µs delay @168 MHz
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-
-    // --- 2. Wait for ECHO rising edge ---
-    while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_9) == GPIO_PIN_RESET);
-
-    start_tick = DWT->CYCCNT;
-
-    // --- 3. Wait for ECHO falling edge ---
-    while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_9) == GPIO_PIN_SET);
-
-    stop_tick = DWT->CYCCNT;
-
-    // --- 4. Compute pulse length ---
-    pulse_length = stop_tick - start_tick;
-
-    // Convert to µs (SystemCoreClock = 168 MHz → 1 tick = 1/168 MHz = 5.95 ns)
-    uint32_t time_us = pulse_length / (SystemCoreClock / 1000000);
-
-    // Distance (cm) = (time_us * 0.0343) / 2
-    return (uint32_t)((time_us * 343) / 20000);  // optimized integer math
-}
-
-/**
- * @brief Checks the ultrasonic distance and triggers the motor stop if the distance
- * is less than the defined threshold (24 cm).
- */
-void Check_US_Interrupt_Trigger(void)
-{
-    // Check for distance violation AND ensure the interrupt hasn't been handled yet
-    if (us_distance_cm < SAFE_DISTANCE_CM && distance_interrupt_triggered == false)
-    {
-        // 1. Set the flag (The "interrupt" event)
-        distance_interrupt_triggered = true;
-
-        // 2. Stop the motors immediately
-        Motor_stop(); // Uses the existing Motor_stop() function
-
-        // At this point, the motors are stopped. The flag will cause the current
-        // blocking movement function (e.g., run_straight_to_distance_cm) to exit,
-        // allowing the program to execute the "next instruction" in the main loop.
-    }
-}
-
 //Checklist for checking obstacle sides
 void orbit_from_front(float target_angle, int base_pwm, float steer_angle){
 
@@ -2047,7 +2241,6 @@ int main(void)
   MX_GPIO_Init();
   MX_TIM8_Init();
   MX_TIM2_Init();
-  MX_USART2_UART_Init();
   MX_TIM1_Init();
   MX_USART3_UART_Init();
   MX_I2C2_Init();
@@ -2126,16 +2319,16 @@ int main(void)
   //turn_on_spot_degrees(180.0, 3000);
   //Motor_forward(3000);
   //Servo_WriteUS(2400); HAL_Delay(1000);  // right
-  /*
-  Steering_ToUS(-45);HAL_Delay(800);
-  Steering_ToUS(-25);HAL_Delay(800);
-  Steering_ToUS(-10);HAL_Delay(800);
-  Steering_ToUS(0);HAL_Delay(800);
-  Steering_ToUS(45);HAL_Delay(800);
-  Steering_ToUS(25);HAL_Delay(800);
-  Steering_ToUS(10);HAL_Delay(800);
-  Steering_ToUS(0);HAL_Delay(800);
-  */
+
+//  Steering_ToUS(-45);HAL_Delay(800);
+//  Steering_ToUS(-25);HAL_Delay(800);
+//  Steering_ToUS(-10);HAL_Delay(800);
+//  Steering_ToUS(0);HAL_Delay(800);
+//  Steering_ToUS(45);HAL_Delay(800);
+//  Steering_ToUS(25);HAL_Delay(800);
+//  Steering_ToUS(10);HAL_Delay(800);
+//  Steering_ToUS(0);HAL_Delay(800);
+
 
   //Steering_ToUS(0);
   //HAL_Delay(1000);
@@ -2151,7 +2344,9 @@ int main(void)
   //orbit_from_front(68.0,2000,35.0);
   Queue_Init();
   HAL_UART_Receive_IT(&huart3, (uint8_t*)rx_buffer, COMMAND_SIZE);
+  HAL_TIM_IC_Start_IT(&htim3, TIM_CHANNEL_3);
   Steering_ToUS(0);
+
 
   // --- Gyro warm-up (reduce jerk from bad first samples) ---
   for (int i = 0; i < 50; i++) {   // ~500 ms
@@ -2177,7 +2372,7 @@ int main(void)
   //segment 1
   run_straight_to_distance_cm(80.0,2000);
   HAL_Delay(800);
-  turn_by_angle_degrees(33.25,2000,20.0);
+  turn_by_angle_degrees(28.25,2000,20.0);
   HAL_Delay(800);
   turn_by_angle_degrees(33.25,2000,20.0);
   Motor_stop();
@@ -2226,7 +2421,7 @@ int main(void)
 	  }
 
     // Example: keep reading distance while idle
-	  uint32_t distance = HCSR04_Read();
+	  volatile float distance = 0.0f;
 
 	  sprintf(buf, "Dist: %lu cm", distance);
 	  OLED_ShowString(0, 60, (uint8_t*)buf);
@@ -2628,6 +2823,7 @@ static void MX_TIM3_Init(void)
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
 
   /* USER CODE BEGIN TIM3_Init 1 */
 
@@ -2651,6 +2847,10 @@ static void MX_TIM3_Init(void)
   {
     Error_Handler();
   }
+  if (HAL_TIM_IC_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
@@ -2661,6 +2861,18 @@ static void MX_TIM3_Init(void)
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim3, &sConfigIC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
   {
     Error_Handler();
