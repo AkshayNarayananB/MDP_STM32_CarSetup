@@ -747,7 +747,7 @@ void run_straight_to_distance_cm_MAG(float target_cm, int base_pwm)
         // --- Complementary filter ---
         float mag_heading = atan2f(my, mx);  // radians
         fused_heading += gz_dps * (3.14159265f / 180.0f) * dt; // gyro integration
-        float alpha = 1.0f;
+        float alpha = 0.95f;
         fused_heading = alpha * fused_heading + (1.0f - alpha) * mag_heading;
 
         if (fused_heading > 3.14159265f) fused_heading -= 2.0f * 3.14159265f;
@@ -1518,7 +1518,7 @@ void Execute_Command(Command_t *cmd)
     }
     else if (strcmp(cmd->buffer, "rhtbw") == 0)
     {
-        turn_by_angle_degrees_backwards(25.25, 2000, 20.0); //right backward
+        turn_by_angle_degrees_backwards(23.25, 2000, 20.0); //right backward
     }
     else if (strcmp(cmd->buffer, "rhtof") == 0){
         turn_by_angle_degrees_ONE(25.25, 2000, 20.0); //left smaller radius
