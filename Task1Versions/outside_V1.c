@@ -1140,56 +1140,456 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
     OLED_Refresh_Gram();
 }
 
+//void pivot_turn_90_degrees_left()
+//{
+//    int left_pwm, right_pwm;
+//    float heading = 0.0f;
+//    float gz_filtered = 0.0f;
+//    uint32_t last_time = HAL_GetTick();
+//
+//    // Raw sensor variables for reading
+//    int16_t ax, ay, az, gx, gy, gz;
+//    float gz_dps;
+//
+//    const float PIVOT_TARGET_ANGLE = 10.0f; // Added 'f' for float literal
+//    const int PIVOT_PWM = 4500;             // Fixed PWM for the pivot turn
+//
+//	right_pwm = PIVOT_PWM; // Negative for reverse
+//	left_pwm = -PIVOT_PWM;   // Positive for forward
+//
+//    Motor_set_pwm(left_pwm, right_pwm);
+//    HAL_Delay(680); // Pause to ensure full stop/settling time
+//    Motor_stop(); // Already called in the loop
+//
+//    Steering_ToUS(0.0); // Ensure steering is neutral
+//    HAL_Delay(500); // Wait for physical movement to stop
+//}
+
 void pivot_turn_90_degrees_left()
 {
-    int left_pwm, right_pwm;
-    float heading = 0.0f;
-    float gz_filtered = 0.0f;
-    uint32_t last_time = HAL_GetTick();
-
-    // Raw sensor variables for reading
     int16_t ax, ay, az, gx, gy, gz;
     float gz_dps;
+    float heading = 0.0f;           // Integrated angle
+    float gz_filtered = 1.0f;
+    uint32_t last_time = HAL_GetTick();
 
-    const float PIVOT_TARGET_ANGLE = 10.0f; // Added 'f' for float literal
-    const int PIVOT_PWM = 2500;             // Fixed PWM for the pivot turn
+    const float PIVOT_TARGET_ANGLE = 90.0f; // Target Angle
+    const int PIVOT_PWM = 4500;  //4500            // Very light PWM for light turning
+    const int TURN_DELAY_MS = 0;           // Duration of the brief turn pulse
 
-	right_pwm = PIVOT_PWM; // Negative for reverse
-	left_pwm = -PIVOT_PWM;   // Positive for forward
+    int left_pwm, right_pwm;
+    char uart_buf[64]; // Buffer for UART transmission
 
+    OLED_Clear();
+    right_pwm = PIVOT_PWM; // Negative for reverse (Right Wheel)
+    left_pwm = -PIVOT_PWM;   // Positive
     Motor_set_pwm(left_pwm, right_pwm);
-    HAL_Delay(700); // Pause to ensure full stop/settling time
-    Motor_stop(); // Already called in the loop
+    ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+	gz_dps = gz / 131.0f - gyro_bias; // Convert raw reading to degrees per second (dps)
 
-    Steering_ToUS(0.0); // Ensure steering is neutral
-    HAL_Delay(500); // Wait for physical movement to stop
+	// Δt - Calculate time elapsed since last calculation
+	uint32_t now = HAL_GetTick();
+	float dt = (now - last_time) / 1000.0f;
+	if (dt <= 0) dt = 0.001f;
+	last_time = now;
+
+	// Filter and integrate
+	// NOTE: The filter parameters (0.9, 0.1) may need tuning.
+	//gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+	//heading += gz_filtered * dt; // Integrate rate (dps) over time (s) to get angle (degrees)
+    __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 2500);
+   // HAL_Delay(500);
+    while (fabs(heading) < fabs(PIVOT_TARGET_ANGLE)-44)
+    {
+        // 1. Brief Motor Pulse
+
+        // 2. Stop Motors
+        //Motor_stop();
+
+        // 3. Read IMU and Integrate Angle (while stopped/settling)
+        // This is a critical step to ensure the angle calculation is based on actual movement.
+        ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+        gz_dps = gz / 131.0f - gyro_bias; // Convert raw reading to degrees per second (dps)
+
+        // Δt - Calculate time elapsed since last calculation
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time = now;
+
+        // Filter and integrate
+        // NOTE: The filter parameters (0.9, 0.1) may need tuning.
+        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+        heading += gz_filtered * dt; // Integrate rate (dps) over time (s) to get angle (degrees)
+
+        // 4. Send current gyro value (gz_dps) on UART3
+        sprintf(uart_buf, "Gyro Z: %.2f dps | Heading: %.1f deg\r\n", gz_dps, heading);
+        // Replace with your actual UART sending function
+        // UART3_SendString(uart_buf);
+
+        // 5. Display and Wait (for next pulse)
+        sprintf(buf, "Current: %.1f deg", gz_filtered);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+        sprintf(buf, "Current: %.1f heading", heading);
+        OLED_ShowString(0, 40, (uint8_t *)buf);
+        OLED_Refresh_Gram();
+
+        // Add a short delay to allow for the reading/processing/settling before the next pulse
+        // The total turn speed will be determined by PIVOT_PWM, TURN_DELAY_MS, and this extra delay.
+        HAL_Delay(10);
+    }
+    Motor_stop(); // Ensure motors are stopped
+    HAL_Delay(200);
+    Steering_ToUS(0.0);
+
+    OLED_Clear();
+    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
+    sprintf(buf, "Final: %.1f deg", heading);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+
+    sprintf(uart_buf, "Turn COMPLETE! Final Heading: %.1f deg\r\n", heading);
+    HAL_Delay(500); // Wait for physical movement to fully stop
+
 }
 
 
+//void pivot_turn_90_degrees_right()
+//{
+//    int left_pwm, right_pwm;
+//    float heading = 0.0f;
+//    float gz_filtered = 0.0f;
+//    uint32_t last_time = HAL_GetTick();
+//
+//    int16_t ax, ay, az, gx, gy, gz;
+//    float gz_dps;
+//
+//
+//    const float PIVOT_TARGET_ANGLE = 40.0f; // Added 'f' for float literal
+//    const int PIVOT_PWM = 3500;             // Fixed PWM for the pivot turn
+//
+//	right_pwm = -PIVOT_PWM; // Negative for reverse
+//	left_pwm = PIVOT_PWM;   // Positive for forward
+//
+//    Motor_set_pwm(left_pwm, right_pwm);
+//
+//    // --- Main loop ---
+//    while (1)
+//    {
+//        // Read IMU
+//        ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+//        gz_dps = gz / 131.0f;
+//
+//        // Δt
+//        uint32_t now = HAL_GetTick();
+//        float dt = (now - last_time) / 1000.0f;
+//        if (dt <= 0) dt = 0.001f;
+//        last_time = now;
+//
+//        // Filter and integrate
+//        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+//        heading += gz_filtered * dt;
+//
+//        // Check completion
+//        if (fabs(heading) >= fabs(PIVOT_TARGET_ANGLE))
+//        {
+//            Motor_stop();
+//            HAL_Delay(200);
+//
+//            // Return steering to neutral with brief counter turn
+//            Steering_ToUS(0.0);
+//            break;
+//        }
+//
+//        // Display current heading
+//        sprintf(buf, "Current: %.1f deg", heading);
+//        OLED_ShowString(0, 20, (uint8_t *)buf);
+//        OLED_Refresh_Gram();
+//
+//        HAL_Delay(10);
+//    }
+//
+//    // --- Final OLED message ---
+//    OLED_Clear();
+//    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
+//    sprintf(buf, "Final: %.1f deg", heading);
+//    OLED_ShowString(0, 20, (uint8_t *)buf);
+//    OLED_Refresh_Gram();
+//
+//    HAL_Delay(630); // Pause to ensure full stop/settling time
+//    Motor_stop(); // Already called in the loop
+//
+//    Steering_ToUS(0.0); // Ensure steering is neutral
+//    HAL_Delay(500); // Wait for physical movement to stop
+//}
+
+// Note: Assuming 'buf' is a globally defined char array for sprintf
+// and UART3_SendString is a function you have defined for UART transmission.
 
 void pivot_turn_90_degrees_right()
 {
-    int left_pwm, right_pwm;
-    float heading = 0.0f;
-    float gz_filtered = 0.0f;
-    uint32_t last_time = HAL_GetTick();
-
-    // Raw sensor variables for reading
     int16_t ax, ay, az, gx, gy, gz;
     float gz_dps;
+    float heading = 0.0f;           // Integrated angle
+    float gz_filtered = 1.0f;
+    uint32_t last_time = HAL_GetTick();
 
-    const float PIVOT_TARGET_ANGLE = 10.0f; // Added 'f' for float literal
-    const int PIVOT_PWM = 2500;             // Fixed PWM for the pivot turn
+    const float PIVOT_TARGET_ANGLE = 90.0f; // Target Angle
+    const int PIVOT_PWM = 3300; //3000;              // Very light PWM for light turning
+    const int TURN_DELAY_MS = 0;           // Duration of the brief turn pulse
 
-	right_pwm = -PIVOT_PWM; // Negative for reverse
-	left_pwm = PIVOT_PWM;   // Positive for forward
+    int left_pwm, right_pwm;
+    char uart_buf[64]; // Buffer for UART transmission
 
+    OLED_Clear();
+    right_pwm = -PIVOT_PWM; // Negative for reverse (Right Wheel)
+    left_pwm = PIVOT_PWM;   // Positive
     Motor_set_pwm(left_pwm, right_pwm);
-    HAL_Delay(700); // Pause to ensure full stop/settling time
-    Motor_stop(); // Already called in the loop
+    ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+	gz_dps = gz / 131.0f - gyro_bias; // Convert raw reading to degrees per second (dps)
 
-    Steering_ToUS(0.0); // Ensure steering is neutral
-    HAL_Delay(500); // Wait for physical movement to stop
+	// Δt - Calculate time elapsed since last calculation
+	uint32_t now = HAL_GetTick();
+	float dt = (now - last_time) / 1000.0f;
+	if (dt <= 0) dt = 0.001f;
+	last_time = now;
+
+	// Filter and integrate
+	// NOTE: The filter parameters (0.9, 0.1) may need tuning.
+	//gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+	//heading += gz_filtered * dt; // Integrate rate (dps) over time (s) to get angle (degrees)
+    __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 500);
+   // HAL_Delay(500);
+    while (fabs(heading) < fabs(PIVOT_TARGET_ANGLE)-45)
+    {
+        // 1. Brief Motor Pulse
+
+        // 2. Stop Motors
+        //Motor_stop();
+
+        // 3. Read IMU and Integrate Angle (while stopped/settling)
+        // This is a critical step to ensure the angle calculation is based on actual movement.
+        ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+        gz_dps = gz / 131.0f - gyro_bias; // Convert raw reading to degrees per second (dps)
+
+        // Δt - Calculate time elapsed since last calculation
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time = now;
+
+        // Filter and integrate
+        // NOTE: The filter parameters (0.9, 0.1) may need tuning.
+        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+        heading += gz_filtered * dt; // Integrate rate (dps) over time (s) to get angle (degrees)
+
+        // 4. Send current gyro value (gz_dps) on UART3
+        sprintf(uart_buf, "Gyro Z: %.2f dps | Heading: %.1f deg\r\n", gz_dps, heading);
+        // Replace with your actual UART sending function
+        // UART3_SendString(uart_buf);
+
+        // 5. Display and Wait (for next pulse)
+        sprintf(buf, "Current: %.1f deg", gz_filtered);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+        sprintf(buf, "Current: %.1f heading", heading);
+        OLED_ShowString(0, 40, (uint8_t *)buf);
+        OLED_Refresh_Gram();
+
+        // Add a short delay to allow for the reading/processing/settling before the next pulse
+        // The total turn speed will be determined by PIVOT_PWM, TURN_DELAY_MS, and this extra delay.
+        HAL_Delay(10);
+       // Motor_set_pwm(left_pwm, right_pwm);
+    }
+    Motor_stop(); // Ensure motors are stopped
+    HAL_Delay(200);
+    Steering_ToUS(0.0);
+
+    OLED_Clear();
+    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
+    sprintf(buf, "Final: %.1f deg", heading);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+
+    sprintf(uart_buf, "Turn COMPLETE! Final Heading: %.1f deg\r\n", heading);
+    HAL_Delay(500); // Wait for physical movement to fully stop
+
+}
+
+void image_right()
+{
+    int16_t ax, ay, az, gx, gy, gz;
+    float gz_dps;
+    float heading = 0.0f;           // Integrated angle
+    float gz_filtered = 1.0f;
+    uint32_t last_time = HAL_GetTick();
+
+    const float PIVOT_TARGET_ANGLE = 10.0f; // Target Angle
+    const int PIVOT_PWM = 2000;              // Very light PWM for light turning
+    const int TURN_DELAY_MS = 0;           // Duration of the brief turn pulse
+
+    int left_pwm, right_pwm;
+    char uart_buf[64]; // Buffer for UART transmission
+
+    OLED_Clear();
+    right_pwm = -PIVOT_PWM; // Negative for reverse (Right Wheel)
+    left_pwm = PIVOT_PWM;   // Positive
+    Motor_set_pwm(left_pwm, right_pwm);
+    ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+	gz_dps = gz / 131.0f - gyro_bias; // Convert raw reading to degrees per second (dps)
+
+	// Δt - Calculate time elapsed since last calculation
+	uint32_t now = HAL_GetTick();
+	float dt = (now - last_time) / 1000.0f;
+	if (dt <= 0) dt = 0.001f;
+	last_time = now;
+
+	// Filter and integrate
+	// NOTE: The filter parameters (0.9, 0.1) may need tuning.
+	//gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+	//heading += gz_filtered * dt; // Integrate rate (dps) over time (s) to get angle (degrees)
+    __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 500);
+   // HAL_Delay(500);
+    while (fabs(heading) < fabs(PIVOT_TARGET_ANGLE))
+    {
+        // 1. Brief Motor Pulse
+
+        // 2. Stop Motors
+        //Motor_stop();
+
+        // 3. Read IMU and Integrate Angle (while stopped/settling)
+        // This is a critical step to ensure the angle calculation is based on actual movement.
+        ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+        gz_dps = gz / 131.0f - gyro_bias; // Convert raw reading to degrees per second (dps)
+
+        // Δt - Calculate time elapsed since last calculation
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time = now;
+
+        // Filter and integrate
+        // NOTE: The filter parameters (0.9, 0.1) may need tuning.
+        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+        heading += gz_filtered * dt; // Integrate rate (dps) over time (s) to get angle (degrees)
+
+        // 4. Send current gyro value (gz_dps) on UART3
+        sprintf(uart_buf, "Gyro Z: %.2f dps | Heading: %.1f deg\r\n", gz_dps, heading);
+        // Replace with your actual UART sending function
+        // UART3_SendString(uart_buf);
+
+        // 5. Display and Wait (for next pulse)
+        sprintf(buf, "Current: %.1f deg", gz_filtered);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+        sprintf(buf, "Current: %.1f heading", heading);
+        OLED_ShowString(0, 40, (uint8_t *)buf);
+        OLED_Refresh_Gram();
+
+        // Add a short delay to allow for the reading/processing/settling before the next pulse
+        // The total turn speed will be determined by PIVOT_PWM, TURN_DELAY_MS, and this extra delay.
+        HAL_Delay(10);
+       // Motor_set_pwm(left_pwm, right_pwm);
+    }
+    Motor_stop(); // Ensure motors are stopped
+    HAL_Delay(200);
+    Steering_ToUS(0.0);
+
+    OLED_Clear();
+    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
+    sprintf(buf, "Final: %.1f deg", heading);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+
+    sprintf(uart_buf, "Turn COMPLETE! Final Heading: %.1f deg\r\n", heading);
+    HAL_Delay(500); // Wait for physical movement to fully stop
+
+}
+
+void image_left()
+{
+    int16_t ax, ay, az, gx, gy, gz;
+    float gz_dps;
+    float heading = 0.0f;           // Integrated angle
+    float gz_filtered = 1.0f;
+    uint32_t last_time = HAL_GetTick();
+
+    const float PIVOT_TARGET_ANGLE = 10.0f; // Target Angle
+    const int PIVOT_PWM = 2500;              // Very light PWM for light turning
+    const int TURN_DELAY_MS = 0;           // Duration of the brief turn pulse
+
+    int left_pwm, right_pwm;
+    char uart_buf[64]; // Buffer for UART transmission
+
+    OLED_Clear();
+    right_pwm = PIVOT_PWM; // Negative for reverse (Right Wheel)
+    left_pwm = -PIVOT_PWM;   // Positive
+    Motor_set_pwm(left_pwm, right_pwm);
+    ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+	gz_dps = gz / 131.0f - gyro_bias; // Convert raw reading to degrees per second (dps)
+
+	// Δt - Calculate time elapsed since last calculation
+	uint32_t now = HAL_GetTick();
+	float dt = (now - last_time) / 1000.0f;
+	if (dt <= 0) dt = 0.001f;
+	last_time = now;
+
+	// Filter and integrate
+	// NOTE: The filter parameters (0.9, 0.1) may need tuning.
+	//gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+	//heading += gz_filtered * dt; // Integrate rate (dps) over time (s) to get angle (degrees)
+    __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 2500);
+   // HAL_Delay(500);
+    while (fabs(heading) < fabs(PIVOT_TARGET_ANGLE))
+    {
+        // 1. Brief Motor Pulse
+
+        // 2. Stop Motors
+        //Motor_stop();
+
+        // 3. Read IMU and Integrate Angle (while stopped/settling)
+        // This is a critical step to ensure the angle calculation is based on actual movement.
+        ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+        gz_dps = gz / 131.0f - gyro_bias; // Convert raw reading to degrees per second (dps)
+
+        // Δt - Calculate time elapsed since last calculation
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time = now;
+
+        // Filter and integrate
+        // NOTE: The filter parameters (0.9, 0.1) may need tuning.
+        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+        heading += gz_filtered * dt; // Integrate rate (dps) over time (s) to get angle (degrees)
+
+        // 4. Send current gyro value (gz_dps) on UART3
+        sprintf(uart_buf, "Gyro Z: %.2f dps | Heading: %.1f deg\r\n", gz_dps, heading);
+        // Replace with your actual UART sending function
+        // UART3_SendString(uart_buf);
+
+        // 5. Display and Wait (for next pulse)
+        sprintf(buf, "Current: %.1f deg", gz_filtered);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+        sprintf(buf, "Current: %.1f heading", heading);
+        OLED_ShowString(0, 40, (uint8_t *)buf);
+        OLED_Refresh_Gram();
+
+        // Add a short delay to allow for the reading/processing/settling before the next pulse
+        // The total turn speed will be determined by PIVOT_PWM, TURN_DELAY_MS, and this extra delay.
+        HAL_Delay(10);
+    }
+    Motor_stop(); // Ensure motors are stopped
+    HAL_Delay(200);
+    Steering_ToUS(0.0);
+
+    OLED_Clear();
+    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
+    sprintf(buf, "Final: %.1f deg", heading);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+
+    sprintf(uart_buf, "Turn COMPLETE! Final Heading: %.1f deg\r\n", heading);
+    HAL_Delay(500); // Wait for physical movement to fully stop
+
 }
 
 
@@ -1542,6 +1942,12 @@ void Queue_Init(void)
  */
 int Queue_Enqueue(char *cmd)
 {
+	if (strncmp(cmd, "TIMER", COMMAND_SIZE) == 0) {
+		fprintf(stderr, "Fatal: 'TIMER' command received. Stopping program.\n");
+		Motor_stop();
+		exit(EXIT_FAILURE);  // Abruptly stop the program
+	}
+
     if (cmdQueue.count < QUEUE_DEPTH) {
         // Copy the command (5 chars)
         memcpy(cmdQueue.commands[cmdQueue.head].buffer, cmd, COMMAND_SIZE);
@@ -1608,11 +2014,12 @@ void Execute_Command(Command_t *cmd)
 
         if (strncmp(cmd->buffer, "fw", 2) == 0)
         {
-            run_straight_to_distance_cm_MAG(distance,3000);
+            run_straight_to_distance_cm_MAG(distance,2500);
+            HAL_Delay(200);
         }
         else // Must be "bw"
         {
-            run_straight_to_distance_cm_backward_MAG(distance,3000);
+            run_straight_to_distance_cm_backward_MAG(distance,2500);
         }
     }
     // -----------------------------------------------------------
@@ -1621,10 +2028,12 @@ void Execute_Command(Command_t *cmd)
     else if (strcmp(cmd->buffer, "rhtfw") == 0)
     {
     	  turn_by_angle_degrees(25.25, 2000, 20.0); //right forward
+    	  HAL_Delay(200);
     }
     else if (strcmp(cmd->buffer, "rhtbw") == 0)
     {
         turn_by_angle_degrees_backwards(23.25, 2000, 20.0); //right backward
+        HAL_Delay(200);
     }
     else if (strcmp(cmd->buffer, "rhtof") == 0){
         turn_by_angle_degrees_ONE(33.5, 2000, 20.0); //left smaller radius
@@ -1634,29 +2043,45 @@ void Execute_Command(Command_t *cmd)
     }
     else if (strcmp(cmd->buffer, "lftfw") == 0)
     {
-    	  turn_by_angle_degrees(-25.25, 2000, 20.0); //left
+    	  turn_by_angle_degrees(-24.25, 2000, 20.0); //left
     }
     else if (strcmp(cmd->buffer, "lftbw") == 0)
     {
-  	  turn_by_angle_degrees_backwards(-15.25, 2000, -18.0); //back left
+  	  turn_by_angle_degrees_backwards(-15.75, 2000, -18.0); //back left
     }
     else if (strcmp(cmd->buffer, "lftof") == 0){
-    	turn_by_angle_degrees_ONE(-33.25, 2000, 20.0); //left smaller radius
+    	turn_by_angle_degrees_ONE(-31.25, 2000, 20.0); //left smaller radius
     }
     else if (strcmp(cmd->buffer, "lftob") == 0){
-        turn_by_angle_degrees_backwards_ONE(-33.25, 2000, 20.0); //left smaller radius
+        turn_by_angle_degrees_backwards_ONE(-30.75, 2000, 20.0); //left smaller radius
     }
     else if (strcmp(cmd->buffer, "SNAP_") == 0)
     {
-    	HAL_UART_Transmit_IT(&huart3, (uint8_t *)(cmd->buffer), 5); // SNAP
+    	//HAL_UART_Transmit_IT(&huart3, (uint8_t *)(cmd->buffer), 5); // SNAP
+    	HAL_UART_Transmit(&huart3, (uint8_t *)(cmd->buffer), strlen(cmd->buffer), HAL_MAX_DELAY);
     	HAL_Delay(2000);
     }
     else if (strcmp(cmd->buffer, "rboot") == 0){
     	HAL_NVIC_SystemReset(); //system reset -> program starts again from main
     }
-    else if (strcmp(cmd->buffer, 'rhtpv') == 0){
-    	pivot_turn_90_degrees_right();
+    else if (strcmp(cmd->buffer, "right") == 0){
+    	run_straight_to_distance_cm_MAG(16.0,2000);
+    	pivot_turn_90_degrees_right(); //system reset -> program starts again from main
+    	HAL_Delay(200);
     }
+    else if (strcmp(cmd->buffer, "rhtim") == 0){
+    	image_right(); //system reset -> program starts again from main
+    }
+    else if (strcmp(cmd->buffer, "lftim") == 0){
+    	image_left(); //system reset -> program starts again from main
+    }
+
+    else if (strcmp(cmd->buffer, "left_") == 0){
+    	run_straight_to_distance_cm_MAG(16.0,2000);
+    	pivot_turn_90_degrees_left(); //system reset -> program starts again from main image_right
+    	HAL_Delay(200);
+    }
+
 
     // -----------------------------------------------------------
     // UNKNOWN COMMAND
@@ -2454,6 +2879,7 @@ int main(void)
   Queue_Init();
   HAL_UART_Receive_IT(&huart3, (uint8_t*)rx_buffer, COMMAND_SIZE);
   HAL_TIM_IC_Start_IT(&htim3, TIM_CHANNEL_3);
+  Steering_ToUS(0.0);
 
 
   // --- Gyro warm-up (reduce jerk from bad first samples) ---
@@ -2474,13 +2900,13 @@ int main(void)
   }
   gyro_bias = gyro_bias_sum / num_cal_samples;
 
-  //__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 500);
-  //HAL_Delay(800);
-  //pivot_turn_90_degrees_right();
-
-  //__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 2400);
-  //HAL_Delay(800);
-  //pivot_turn_90_degrees_left();
+//  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 500);
+//  HAL_Delay(800);
+//  pivot_turn_90_degrees_right();
+//
+//  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 2500);
+//  HAL_Delay(800);
+//  pivot_turn_90_degrees_left();
   // -- Path Sample Functions -- //
 /*
   // -- Sample Path -- //
