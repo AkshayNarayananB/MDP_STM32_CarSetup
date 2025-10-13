@@ -35,18 +35,6 @@ float MAG_SOFT[3][3] = {
 };
 
 
-// --- G L O B A L P O S I T I O N S T A T E ---
-// 1. Initial coordinates are (0, 0)
-float g_robot_x = 0.0f;
-float g_robot_y = 0.0f;
-
-// 2. Heading: 0 degrees is facing forward along the positive Y-axis (North)
-float g_robot_heading = 0.0f;
-
-// 3. Distance of the first obstacle from the origin (Y-axis coordinate where the stop occurred)
-float g_obs1_y_start = 0.0f;
-
-
 // Define the window where deceleration begins (TUNE THIS)
 const float SLOWDOWN_DEGREES = 10.0f; // Start slowing down 10 degrees before target
 const int MIN_TURN_PWM = 500;          // Minimum speed to maintain movement (Tune this)
@@ -60,6 +48,17 @@ static inline void Servo_WriteUS(uint16_t us)
   __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, us);
 }
 
+/**
+ * @brief Map steering direction (deg) to servo PWM microsecond value
+ *
+ * User input range:
+ *   -45 = Full Left  (500 µs)
+ *     0 = Straight   (1150 µs)
+ *   +45 = Full Right (2400 µs)
+ *
+ * @param steer_angle Steering angle in degrees [-45 to +45]
+ * @return uint16_t Pulse width in microseconds
+ */
 uint16_t Steering_ToUS(int16_t steer_angle)
 {
     if (steer_angle < -45) steer_angle = -45;
@@ -462,6 +461,186 @@ void run_straight_to_distance_cm_backward_MAG(float target_cm, int base_pwm)
 
 
 /**
+ * @brief Moves the robot straight backward for a target distance using cascaded PID control.
+ * @param target_cm The total distance (in cm) the robot should travel backward.
+ * @param base_pwm The base speed (PWM magnitude) to apply to the motors.
+ */
+void run_straight_to_distance_cm_backward(float target_cm, int base_pwm)
+{
+    // --- Static variables persist across loop calls (Renamed to prevent collision with forward function) ---
+    static float heading_integral_bwd = 0.0f;
+    static float heading_last_error_bwd = 0.0f;
+    static float speed_integral_bwd = 0.0f;
+    static float speed_last_error_bwd = 0.0f;
+    static float gz_filtered_bwd = 0.0f;
+    static uint32_t last_time_bwd = 0;
+    static int32_t prev_left_counts_bwd = 0;
+    static int32_t prev_right_counts_bwd = 0;
+
+    // --- One-time initialization ---
+    static bool initialized_bwd = false;
+    if (!initialized_bwd) {
+        // Reset PID state when starting a new movement
+        heading_integral_bwd = 0.0f;
+        heading_last_error_bwd = 0.0f;
+        speed_integral_bwd = 0.0f;
+        speed_last_error_bwd = 0.0f;
+        gz_filtered_bwd = 0.0f;
+
+        last_time_bwd = HAL_GetTick();
+        prev_left_counts_bwd = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+        prev_right_counts_bwd = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
+        initialized_bwd = true;
+    }
+
+    // --- Reset encoder counts and distance tracking (Uses the current encoder counts) ---
+    int32_t start_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+    float travelled_cm = 0.0f;
+
+    // --- Control parameters (Exact match to original function) ---
+    const float tol_cm = 1.0f;
+    const float slow_down_cm = 5.0f;
+    const float creep_cm = 1.0f;
+
+    // --- PID gains (tune these!) ---
+    // Heading PID (Outer loop)
+    float Kp_h = 40.0f;
+    float Ki_h = 5.0f;
+    float Kd_h = 3.5f;
+
+    // Speed PID (Inner loop)
+    float Kp_e = 0.5f;
+    float Ki_e = 0.04f;
+    float Kd_e = 0.1f;
+
+    char buf[50];
+
+    while (1)
+    {
+        // --- Distance travelled ---
+        int32_t cur_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+        int32_t diff = cur_pos - start_pos;
+        // abs() is used to track distance regardless of encoder direction (forward or backward)
+        travelled_cm = counts_to_cm(abs(diff));
+
+        float remaining = target_cm - travelled_cm;
+
+        if (remaining <= tol_cm) {
+            Motor_stop();
+            // Reset initialization flag so next call (forward or backward) runs initialization
+            initialized_bwd = false;
+            break;
+        }
+
+        // --- Δt calculation ---
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time_bwd) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time_bwd = now;
+
+        // --- Gyro Read & Heading Calculation (Outer Loop) ---
+        int16_t gz_raw;
+        // Assuming ICM20948_ReadRaw and gyro_bias are defined globally
+        ICM20948_ReadRaw(NULL, NULL, NULL, NULL, NULL, &gz_raw);
+        float gz_dps = gz_raw / 131.0f - gyro_bias;
+        gz_filtered_bwd = 0.9f * gz_filtered_bwd + 0.1f * gz_dps;
+        float heading = 0.0f; // Target heading is 0.0f (straight line)
+        heading += gz_filtered_bwd * dt;
+
+        float heading_error = 0.0f - heading;
+        heading_integral_bwd += heading_error * dt;
+        float heading_derivative = (heading_error - heading_last_error_bwd) / dt;
+        heading_last_error_bwd = heading_error;
+
+        float gyro_correction = Kp_h * heading_error + Ki_h * heading_integral_bwd + Kd_h * heading_derivative;
+
+        // --- Encoder Read & Speed Correction (Inner Loop) ---
+        int32_t left_counts  = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+        int32_t right_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
+
+        int32_t left_delta  = left_counts - prev_left_counts_bwd;
+        int32_t right_delta = right_counts - prev_right_counts_bwd;
+        prev_left_counts_bwd  = left_counts;
+        prev_right_counts_bwd = right_counts;
+
+        // Note: speed_error is calculated as (Left - Right) delta counts
+        float speed_error = (float)(left_delta - right_delta);
+
+        speed_integral_bwd += speed_error * dt;
+        float speed_derivative = (speed_error - speed_last_error_bwd) / dt;
+        speed_last_error_bwd = speed_error;
+
+        float encoder_correction = Kp_e * speed_error + Ki_e * speed_integral_bwd + Kd_e * speed_derivative;
+
+        // --- PWM scaling (Magnitude control) ---
+        int pwm_backward = base_pwm;
+        if (remaining < slow_down_cm) pwm_backward = (int)(0.6f * base_pwm);
+        if (remaining < creep_cm) pwm_backward = pwmMin + 60; // Assuming pwmMin is available
+
+        // --- Apply Corrections (SIGNS FLIPPED FOR BACKWARD MOTION) ---
+        // Original Forward: Left = PWM + (+G - E), Right = PWM + (-G + E)
+        // Backward: Left = PWM + (-G + E), Right = PWM + (+G - E)
+
+        //int left_pwm  = pwm_backward + (int)(-0.7 * gyro_correction + 0.3 * encoder_correction);
+        //int right_pwm = pwm_backward + (int)( 0.7 * gyro_correction - 0.3 * encoder_correction);
+
+        // Gemini Input, reverse signs for reverse directed drift
+        // Suggested fix: Signs of gyro_correction flipped for backward steering logic
+        int left_pwm  = pwm_backward + (int)( 0.7 * gyro_correction + 0.3 * encoder_correction);  // Added correction (slowing down left in reverse)
+        int right_pwm = pwm_backward + (int)(-0.7 * gyro_correction - 0.3 * encoder_correction); // Subtracted correction (speeding up right in reverse)
+
+        // --- Clamp PWM ---
+        // Ensure the magnitude of PWM stays within the allowed range
+        if (left_pwm > pwmMax) left_pwm = pwmMax;
+        if (left_pwm < pwmMin) left_pwm = pwmMin;
+        if (right_pwm > pwmMax) right_pwm = pwmMax;
+        if (right_pwm < pwmMin) right_pwm = pwmMin;
+
+        // --- Anti-windup clamping for integrals ---
+        if (heading_integral_bwd > 100) heading_integral_bwd = 100;
+        if (heading_integral_bwd < -100) heading_integral_bwd = -100;
+
+        if (speed_integral_bwd > 50) speed_integral_bwd = 50;
+        if (speed_integral_bwd < -50) speed_integral_bwd = -50;
+
+
+        Motor_set_pwm_reverse(left_pwm, right_pwm); // Use the reverse motor function
+
+        // --- Optional OLED updates (Exact match to original) ---
+        OLED_Clear(); // Assuming OLED functions exist
+        sprintf(buf, "Target: %.1fcm", target_cm);
+        OLED_ShowString(0, 0, (uint8_t *)buf);
+        sprintf(buf, "Travel: %.1fcm", travelled_cm);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+
+        // Calculate RPM using the provided COUNTS_PER_REV
+        float left_rpm = (abs(left_delta) / COUNTS_PER_REV) / dt * 60.0f;
+        float right_rpm = (abs(right_delta) / COUNTS_PER_REV) / dt * 60.0f;
+
+        // Display live RPM
+        sprintf(buf, "L: %.1f", left_rpm);
+        OLED_ShowString(0, 40, (uint8_t *)buf);
+        sprintf(buf, "R: %.1f", right_rpm);
+        OLED_ShowString(60, 40, (uint8_t *)buf);
+
+        OLED_Refresh_Gram();
+
+        HAL_Delay(10);
+    }
+
+    // --- Final OLED display (Exact match to original) ---
+    OLED_Clear();
+    sprintf(buf, "Target: %.1fcm", target_cm);
+    OLED_ShowString(0, 0, (uint8_t *)buf);
+    sprintf(buf, "Travel: %.1fcm", travelled_cm);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    float err_pct = (travelled_cm - target_cm) / target_cm * 100.0f;
+    sprintf(buf, "Error: %.1f%%", err_pct);
+    OLED_ShowString(0, 40, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+}
+
+/**
  * @brief Sets the PWM for both motors to drive them in reverse.
  * * This function reverses direction by swapping the PWM application channels
  * compared to the forward motion function.
@@ -637,6 +816,169 @@ void run_straight_to_distance_cm_MAG(float target_cm, int base_pwm)
     OLED_Refresh_Gram();
 }
 
+
+
+
+void run_straight_to_distance_cm(float target_cm, int base_pwm)
+{
+    // --- Static variables persist across loop calls ---
+    static float heading_integral = 0.0f;
+    static float heading_last_error = 0.0f;
+    static float speed_integral = 0.0f;
+    static float speed_last_error = 0.0f;
+    static float gz_filtered = 0.0f;
+    static uint32_t last_time = 0;
+    static int32_t prev_left_counts = 0;
+    static int32_t prev_right_counts = 0;
+
+    // --- One-time initialization ---
+   static bool initialized = false;
+   if (!initialized) {
+    // Reset PID state when starting a new movement
+	   heading_integral = 0.0f;
+       heading_last_error = 0.0f;
+       speed_integral = 0.0f;
+       speed_last_error = 0.0f;
+       gz_filtered = 0.0f;
+
+       last_time = HAL_GetTick();
+       prev_left_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+       prev_right_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
+       initialized = true;
+    }
+
+    // --- Reset encoder counts and distance tracking ---
+    int32_t start_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+    float travelled_cm = 0.0f;
+
+    // --- Control parameters ---
+    const float tol_cm = 1.0f;
+    const float slow_down_cm = 5.0f;
+    const float creep_cm = 1.0f;
+
+    // --- PID gains (tune these!) ---
+    // Heading PID (Outer loop)
+    float Kp_h = 40.0f;
+    float Ki_h = 5.0f;
+    float Kd_h = 3.5f;
+
+    // Speed PID (Inner loop)
+    float Kp_e = 0.5f;
+    float Ki_e = 0.04f;
+    float Kd_e = 0.1f;
+
+    char buf[50];
+    float heading = 0.0f;
+
+    while (1)
+    {
+        // --- Distance travelled ---
+        int32_t cur_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+        int32_t diff = cur_pos - start_pos;
+        travelled_cm = counts_to_cm(abs(diff));
+
+        float remaining = target_cm - travelled_cm;
+
+        if (remaining <= tol_cm) {
+            Motor_stop();
+            initialized = false;
+            break;
+        }
+
+        // --- Δt calculation ---
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time = now;
+
+        // --- Gyro Read & Heading Calculation (Outer Loop) ---
+        int16_t gz_raw;
+        ICM20948_ReadRaw(NULL, NULL, NULL, NULL, NULL, &gz_raw);
+        float gz_dps = gz_raw / 131.0f - gyro_bias;
+        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+        heading += gz_filtered * dt;
+
+        float heading_error = 0.0f - heading;
+        heading_integral += heading_error * dt;
+        float heading_derivative = (heading_error - heading_last_error) / dt;
+        heading_last_error = heading_error;
+
+        float gyro_correction = Kp_h * heading_error + Ki_h * heading_integral + Kd_h * heading_derivative;
+
+        // --- Encoder Read & Speed Correction (Inner Loop) ---
+        int32_t left_counts  = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+        int32_t right_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
+
+        int32_t left_delta  = left_counts - prev_left_counts;
+        int32_t right_delta = right_counts - prev_right_counts;
+        prev_left_counts  = left_counts;
+        prev_right_counts = right_counts;
+
+        float speed_error = (float)(left_delta - right_delta);
+
+        speed_integral += speed_error * dt;
+        float speed_derivative = (speed_error - speed_last_error) / dt;
+        speed_last_error = speed_error;
+
+        float encoder_correction = Kp_e * speed_error + Ki_e * speed_integral + Kd_e * speed_derivative;
+
+        // --- PWM scaling ---
+        int pwm_forward = base_pwm;
+        if (remaining < slow_down_cm) pwm_forward = (int)(0.6f * base_pwm);
+        if (remaining < creep_cm) pwm_forward = pwmMin + 60;
+
+        // --- Apply Corrections ---
+        int left_pwm  = pwm_forward + (int)(0.7 * gyro_correction - 0.3 * encoder_correction);
+        int right_pwm = pwm_forward + (int)(-0.7 * gyro_correction + 0.3 * encoder_correction);
+
+        // --- Clamp PWM ---
+        if (left_pwm > pwmMax) left_pwm = pwmMax;
+        if (left_pwm < pwmMin) left_pwm = pwmMin;
+        if (right_pwm > pwmMax) right_pwm = pwmMax;
+        if (right_pwm < pwmMin) right_pwm = pwmMin;
+
+        if (heading_integral > 500) heading_integral = 500;
+        if (heading_integral < -500) heading_integral = -500;
+
+        if (speed_integral > 50) speed_integral = 50;
+        if (speed_integral < -50) speed_integral = -50;
+
+
+        Motor_set_pwm(left_pwm, right_pwm);
+
+        // --- Optional OLED updates ---
+        OLED_Clear();
+        sprintf(buf, "Target: %.1fcm", target_cm);
+        OLED_ShowString(0, 0, (uint8_t *)buf);
+        sprintf(buf, "Travel: %.1fcm", travelled_cm);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+
+        // Calculate RPM using the provided COUNTS_PER_REV
+        float left_rpm = (abs(left_delta) / COUNTS_PER_REV) / dt * 60.0f;
+        float right_rpm = (abs(right_delta) / COUNTS_PER_REV) / dt * 60.0f;
+
+        // Display live RPM
+        sprintf(buf, "L: %.1f", left_rpm);
+        OLED_ShowString(0, 40, (uint8_t *)buf);
+        sprintf(buf, "R: %.1f", right_rpm);
+        OLED_ShowString(60, 40, (uint8_t *)buf);
+
+        OLED_Refresh_Gram();
+
+        HAL_Delay(10);
+    }
+
+    // --- Final OLED display ---
+    OLED_Clear();
+    sprintf(buf, "Target: %.1fcm", target_cm);
+    OLED_ShowString(0, 0, (uint8_t *)buf);
+    sprintf(buf, "Travel: %.1fcm", travelled_cm);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    float err_pct = (travelled_cm - target_cm) / target_cm * 100.0f;
+    sprintf(buf, "Error: %.1f%%", err_pct);
+    OLED_ShowString(0, 40, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+}
 
 /**
  * @brief Turns the robot by a specified angle.
@@ -1429,6 +1771,51 @@ uint32_t HCSR04_Read(void)
     return (uint32_t)((time_us * 343) / 20000);  // optimized integer math
 }
 
+//Checklist for checking obstacle sides
+void orbit_from_front(float target_angle, int base_pwm, float steer_angle){
+
+	uint8_t rxByte;
+	uint8_t xPos = 0;       // Track X position (column)
+	uint8_t yPos = 0;       // Track Y row (optional if you want wrapping by line)
+	uint8_t charWidth = 8;  // Assume font width (adjust if your font differs)
+	uint8_t while1 = 0;
+
+	OLED_Clear();
+
+
+	for (int i = 0; i<3; i++){
+		//turn_by_angle_degrees(target_angle, base_pwm, steer_angle);
+
+		//turn_by_angle_degrees(target_angle, base_pwm, steer_angle);
+		const char *snap = "SNAP\n";//Send msg to RPI to capture now
+		HAL_UART_Transmit(&huart3, (uint8_t*)snap,strlen(snap), HAL_MAX_DELAY);
+		HAL_Delay(5000); //5 Seconds for camera to snap
+		while (while1!= 1)
+		    {
+		        if (HAL_UART_Receive(&huart3, &rxByte, 1, HAL_MAX_DELAY) == HAL_OK)
+		        {
+		        	//const char *snap = "SNAP\n";//Send msg to RPI to capture now
+		        	//HAL_UART_Transmit(&huart3, (uint8_t*)snap,strlen(snap), HAL_MAX_DELAY);
+		            // Draw one character at current position
+		            OLED_ShowChar(xPos, yPos, rxByte, 16, 1);  // size=16, mode=1 (adjust if needed)
+		            OLED_Refresh_Gram();
+
+		            if(rxByte == 'b'){
+		            	break;
+		            }
+		            else{
+		            	Motor_stop();
+		            	exit(0);
+		            }
+		//TBD - Receive msg from camera before moving, have a timeout
+		        }
+		    }
+		turn_by_angle_degrees(target_angle, base_pwm, steer_angle);
+	}
+}
+
+
+
 
 /* USER CODE END 0 */
 
@@ -1453,6 +1840,8 @@ void log_magnetometer_data(void) {
     }
 }
 
+
+
 // 2. PID State (Required for persistence between loop iterations)
 float g_heading_integral = 0.0f;
 float g_heading_last_error = 0.0f;
@@ -1467,7 +1856,6 @@ bool g_pid_initialized = false;
 // 3. PID Constants
 const float Kp_h = 40.0f, Ki_h = 5.0f, Kd_h = 3.5f;
 const float Kp_e = 0.5f, Ki_e = 0.04f, Kd_e = 0.1f;
-
 
 void pid_state_reset(void) {
     g_heading_integral = 0.0f;
@@ -1484,49 +1872,7 @@ void pid_state_reset(void) {
     g_pid_initialized = true;
 }
 
-/**
- * @brief Updates the robot's global coordinates based on distance traveled and current heading.
- * * @param distance_cm The distance traveled since the last update (positive for forward).
- */
-void update_coordinates(float distance_cm) {
-    float heading_rad = g_robot_heading * M_PI / 180.0f;
-
-    float dx = distance_cm * sin(heading_rad);
-    float dy = distance_cm * cos(heading_rad);
-
-    g_robot_x += dx;
-    g_robot_y += dy;
-}
-
-void turn_by_angle_degrees_and_update_heading(int angle_deg, int speed, int turn_pwm_diff) {
-    turn_by_angle_degrees(angle_deg, speed, turn_pwm_diff);
-
-    g_robot_heading += (float)angle_deg;
-
-    // Normalize heading to be between -180 and 180
-    if (g_robot_heading > 180.0f) {
-        g_robot_heading -= 360.0f;
-    } else if (g_robot_heading <= -180.0f) {
-        g_robot_heading += 360.0f;
-    }
-}
-
-// Define constants for clarity
-#define OBS1_STOP_DIST_CM 20
-#define OBS2_SAFE_DIST_CM 30
-#define BASE_PWM_SPEED 1500
-#define TURN_PWM_DIFF 30
-#define BYPASS_SIDE_DIST 10.0f // Distance to drive parallel to the obstacle
-#define SIDE_SKIRT_DIST 20.0f // Distance to offset from the center line
-
-/**
- * @brief Executes one single cycle of the PID control loop (10ms) for heading and speed.
- * Updates global state (g_robot_heading, g_robot_x, g_robot_y).
- * @param target_heading_rad The desired heading in radians.
- * @param base_pwm The base speed to apply.
- * @return float The incremental distance traveled in CM in this cycle.
- */
-float pid_control_cycle(float target_heading_rad, int base_pwm) {
+pid_control_cycle(float target_heading_rad, int base_pwm) {
 
     // --- Δt calculation ---
     uint32_t now = HAL_GetTick();
@@ -1568,7 +1914,7 @@ float pid_control_cycle(float target_heading_rad, int base_pwm) {
     int32_t left_delta = left_counts - g_prev_left_counts;
     int32_t right_delta = right_counts - g_prev_right_counts;
 
-    float incremental_dist_cm = counts_to_cm((abs(left_delta) + abs(right_delta)) / 2);
+    //float incremental_dist_cm = counts_to_cm((abs(left_delta) + abs(right_delta)) / 2);
     g_prev_left_counts = left_counts;
     g_prev_right_counts = right_counts;
 
@@ -1609,110 +1955,8 @@ float pid_control_cycle(float target_heading_rad, int base_pwm) {
 
     HAL_Delay(10); // Control loop frequency
 
-    return incremental_dist_cm;
+    //return incremental_dist_cm;
 }
-
-void Task2_Main_Navigation(void)
-{
-    OLED_Clear();
-
-    // Arrow direction for Obstacle 1 bypass
-    char arrow1 = 'R';
-    int dir1 = (arrow1 == 'R') ? 1 : -1;
-
-    // Direction for Obstacle 2 bypass (hardcoded Left)
-    int dir2 = -1; // -1 for Left turn (90 degrees)
-
-    // Current target heading
-    float target_heading;
-    float target_heading_rad;
-
-    // Local variables for distance tracking (PID uses global counters)
-    uint32_t dist_cm = 999;
-    float total_travelled_cm = 0.0f;
-
-    // Variables for PWM scaling and control
-    const float slow_down_cm = 5.0f;
-    int base_pwm = BASE_PWM_SPEED;
-
-// ======================= 1. Obstacle 1: Approach and Stop (ULTRASONIC CHECK) ==============================
-
-    pid_state_reset();
-    target_heading = g_robot_heading;
-    target_heading_rad = target_heading * M_PI / 180.0f;
-
-    OLED_ShowString(48, 0, (uint8_t*)"1: Approach OBS1");
-    OLED_Refresh_Gram();
-
-    while (dist_cm > OBS1_STOP_DIST_CM) {
-        // Continuous external check
-        dist_cm = HCSR04_Read();
-
-        // Dynamic speed scaling for soft stop
-        int current_pwm = BASE_PWM_SPEED;
-        if (dist_cm < OBS1_STOP_DIST_CM + slow_down_cm) {
-             current_pwm = pwmMin + 100; // Creep speed near stop
-        } else {
-             current_pwm = BASE_PWM_SPEED;
-        }
-
-        // Single PID cycle
-        pid_control_cycle(target_heading_rad, current_pwm);
-    }
-
-    Motor_stop(); // Stop once US condition is met
-    HAL_Delay(500);
-
-    // 1. Store the starting Y position of the first obstacle
-    g_obs1_y_start = g_robot_y;
-
-
-    // ---------------------------------------------------------------------- //
-
-    OLED_ShowString(48, 0, (uint8_t*)"2: Bypass OBS1");
-	OLED_Refresh_Gram();
-
-	// --- Segment 2a: Towards Diamong -- //
-	// Angle: 30 deg
-	turn_by_angle_degrees_and_update_heading(dir1 * 45, 2500, dir1 * TURN_PWM_DIFF);
-	target_heading = g_robot_heading;
-	target_heading_rad = target_heading * M_PI / 180.0f;
-
-	// --- Segment 2b: Inner Diamond side -- //
-	// Angle: -60 deg
-	turn_by_angle_degrees_and_update_heading(dir1 * -135, 2500, dir1 * TURN_PWM_DIFF);
-	target_heading = g_robot_heading;
-	target_heading_rad = target_heading * M_PI / 180.0f;
-
-	HAL_Delay(100);
-	run_straight_to_distance_cm_backward_MAG(30.0,2000);
-
-	// --- Segment 2c: Towards Centre -- //
-	// Angle: 30 deg
-	turn_by_angle_degrees_and_update_heading(dir1 * 50, 2500, dir1 * TURN_PWM_DIFF);
-	target_heading = g_robot_heading; // Should be approximately 0 degrees
-	target_heading_rad = target_heading * M_PI / 180.0f;
-
-	HAL_Delay(2000);
-
-	// --- Segment 2f: Drive back to center (Correct X position near 0) ---
-	pid_state_reset();
-
-	// Drive forward while X position is significantly offset from zero.
-	// This is the core 'come back to the center' logic after the obstacle.
-	while(fabs(g_robot_x) > 1.0f) { // Stop when X coordinate is within 1cm of 0
-		pid_control_cycle(target_heading_rad, BASE_PWM_SPEED);
-
-		// Add a safety break for excessive travel
-		if (g_robot_y > g_obs1_y_start + 100.0f) break;
-	}
-	Motor_stop();
-	HAL_Delay(500);
-
-	// ----- OBSTACLE 2 APPROACH ---- //
-}
-
-
 
 
 int main(void)
@@ -1813,11 +2057,15 @@ int main(void)
   MotorDrive_enable();       // enable PWM needed to drive MotroDrive A and D
   millisOld = HAL_GetTick(); // get time value before starting - for PID
 
+  float target_heading;
+  float target_heading_rad;
+
+
   Queue_Init();
   HAL_UART_Receive_IT(&huart3, (uint8_t*)rx_buffer, COMMAND_SIZE);
   Steering_ToUS(0);
 
-  /*
+
   // --- Gyro warm-up (reduce jerk from bad first samples) ---
   for (int i = 0; i < 50; i++) {   // ~500 ms
 	  int16_t gz_raw;
@@ -1835,316 +2083,338 @@ int main(void)
         HAL_Delay(5);
   }
   gyro_bias = gyro_bias_sum / num_cal_samples;
-*/
+
   // -- Path Sample Functions -- //
 
   OLED_Clear();
 
-  g_robot_heading = 0.0f;
 
-  // Enter the main task logic
-  Task2_Main_Navigation();
 
-//
-//
-//
-//  //-------------------------------Task2-----------------------------------------
-//  int dir = 0; //1 for left, -1 for right
-//
-//  //=======================Obstacle 1==================================
-//      //Only obstacle 1 can use diamond as it is a known 10x10 obstacle
-//  	Steering_ToUS(0);
-//  	Motor_set_pwm(2200, 2200); //Move till ultrasonic
-//  	int32_t dist_cm = 999;
-//  	dist_cm = HCSR04_Read();
-//  	while (dist_cm> 20) {
-//  		dist_cm = HCSR04_Read();
-//  		sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
-//  		OLED_ShowString(24, 56, (uint8_t*)buf);
-//  		OLED_Refresh_Gram();
-//  	} //Stop when distance less than 35
-//  	Motor_stop();
-//  	dist_cm = 999; //reset
-//  	char arrow1 = 'R';
-//  	//------------------------Get Camera response--------------------------------------
-//  	/*
-//  	// Send "SNAP" to RPi and wait for arrow
-//  	const char *snap = "SNAP\n";
-//  	HAL_UART_Transmit(&huart3, (uint8_t*)snap, (uint16_t)strlen(snap), HAL_MAX_DELAY);
-//  	uint8_t rx = 0;
-//  	uint32_t t0 = HAL_GetTick(); //Get current time
-//  	char arrow1 = 'L'; //Default left
-//  	while ((HAL_GetTick() - t0) < 12) { //4s timeout
-//  		if (HAL_UART_Receive(&huart3, &rx, 1, 50) == HAL_OK) {
-//  			if (rx == 'L' || rx == 'R') {
-//  				arrow1 = (char)rx;
-//  				break;
-//  			}
-//  		}
-//  	}
-//  	*/
-//  	// ------------------------------------------------------------------------------------
-//  	// === Run diamond shaped using IR ===
-//  	if (arrow1 == 'R'){
-//  		dir = 1;
-//  	}
-//  	else if (arrow1 == 'L'){
-//  		dir = -1;
-//  	}
-//  	//Do manual turnings
-//
-//  	turn_by_angle_degrees(dir *25,2000,dir*30);
-//  	Motor_forward(1000);
-//
-//  	uint16_t raw;
-//  	uint32_t mv;
-//  	float s;
-//
-//  	// Inline IR read
-//	if (dir == 1) { //Turn left
-//		raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
-//		mv = (uint32_t)raw * 3300u / 4095u;
-//		s = dist_cm_from_mv_5(mv);
-//		sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//		OLED_ShowString(24, 56, (uint8_t*)buf);
-//		OLED_Refresh_Gram();
-//		HAL_Delay(10);
-//	} else { //Turn right
-//		raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
-//		mv = (uint32_t)raw * 3300u / 4095u;
-//		s = dist_cm_from_mv_4(mv);
-//		sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//		OLED_ShowString(24, 56, (uint8_t*)buf);
-//		OLED_Refresh_Gram();
-//		HAL_Delay(10);
-//	}
-//  	while (s>15) { //Continue reading IR till it senses the obstacle
-//  		if (dir == 1) {
-//  			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5);
-//  			mv = (uint32_t)raw * 3300u / 4095u;
-//  			s = dist_cm_from_mv_5(mv); //Get distance
-//  			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//			OLED_ShowString(24, 56, (uint8_t*)buf);
-//			OLED_Refresh_Gram();
-//			HAL_Delay(10);
-//  		} else {
-//  			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4);
-//  			mv = (uint32_t)raw * 3300u / 4095u;
-//  			s = dist_cm_from_mv_4(mv); //Get distance
-//  			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//  			OLED_ShowString(24, 56, (uint8_t*)buf);
-//  			OLED_Refresh_Gram();
-//  			HAL_Delay(10);
-//  		}
-//  	}
-//  	Motor_stop();
-//
-//
-//  	if (arrow1 == 'L'){ //Values that fckn works for left
-//  		turn_by_angle_degrees(dir * -30, 1500, dir * -45); //Straighten
-//  	}
-//  	else{
-//  		turn_by_angle_degrees(dir * -30, 1600, dir * -25); //Straighten
-//  	}
-//  	HAL_Delay(500);
-//
-//  //=======================Obstacle 2==================================
-//  	//Motor S
-//  	char arrow2= 'R';
-//  	float travelled_cm =0;
-//  	//------------------------Get Camera response--------------------------------------
-//  	// Send "SNAP" to RPi and wait for arrow
-//  	/*
-//  	const char *snap = "SNAP\n";
-//  	HAL_UART_Transmit(&huart3, (uint8_t*)snap, (uint16_t)strlen(snap), HAL_MAX_DELAY);
-//  	uint8_t rx = 0;
-//  	uint32_t t1= HAL_GetTick(); //Get current time
-//  	char arrow2= 'L'; //Default left
-//  	while ((HAL_GetTick() - t1) < SNAP_TIMEOUT_MS) {
-//  		if (HAL_UART_Receive(&huart3, &rx, 1, 50) == HAL_OK) {
-//  			if (rx == 'L' || rx == 'R') {
-//  				arrow = (char)rx;
-//  				break;
-//  			}
-//  		}
-//  	}
-//  	*/
-//  	// -----------------------------------------------------------------------------------
-//  	float target_dist=0;
-//  	if (arrow2 == 'R'){
-//  		dir = 1;
-//  		target_dist = 30.0;
-//
-//  	}
-//  	else if (arrow2 == 'L'){
-//  		dir = -1;
-//  		target_dist = 25.0;
-//  	}
-//  	//If we are too close to the second obstacle, move back till 50cm distance
-//  	dist_cm = HCSR04_Read(); //Sanity Check
-//  	if (dist_cm <target_dist){
-//  		Motor_set_pwm_reverse(800,800);
-//  		dist_cm = HCSR04_Read();
-//  		while (dist_cm<target_dist) {
-//  			dist_cm = HCSR04_Read();
-//  			sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
-//			OLED_ShowString(24, 56, (uint8_t*)buf);
-//			OLED_Refresh_Gram();
-//		}
-//  		Motor_stop();
-//  		HAL_Delay(500);
-//  	}
-//  	else{ //Move forward till 30cm distance
-//  		int32_t start_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
-//  		Motor_forward(1500);
-//		while (dist_cm>target_dist) {
-//			dist_cm = HCSR04_Read();
-//			sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
-//			OLED_ShowString(24, 56, (uint8_t*)buf);
-//			OLED_Refresh_Gram();
-//		}
-//		int32_t cur_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
-//		int32_t diff = cur_pos - start_pos;
-//		travelled_cm = counts_to_cm(abs(diff));
-//		Motor_stop();
-//		HAL_Delay(500);
-//  	}
-//
-//  	if (arrow2 == 'L'){ //Values that fckn works for left
-//		turn_by_angle_degrees(dir * 65, 1500, dir * 30); //Pause after first obstacle
-//	}
-//	else{
-//		turn_by_angle_degrees(dir * 65, 1600, dir * 40); //pause after second obstacle
-//	}
-//  	Motor_forward(1000); //Move forward
-//  	// Inline IR read
-//	for(i=0;i<10;i++){ //Discard first 10
-//		if (dir == 1) { //Turn left
-//			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
-//			mv = (uint32_t)raw * 3300u / 4095u;
-//			s = dist_cm_from_mv_5(mv);
-//			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//			OLED_ShowString(24, 56, (uint8_t*)buf);
-//			OLED_Refresh_Gram();
-//			HAL_Delay(10);
-//		} else { //Turn right
-//			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
-//			mv = (uint32_t)raw * 3300u / 4095u;
-//			s = dist_cm_from_mv_4(mv);
-//			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//			OLED_ShowString(24, 56, (uint8_t*)buf);
-//			OLED_Refresh_Gram();
-//			HAL_Delay(10);
-//		}
-//	}
-//
-//  	while (s<15) { //Continue reading IR till it senses the exit point
-//  		if (dir > 0) { //if turn left
-//			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
-//			mv = (uint32_t)raw * 3300u / 4095u;
-//			s = dist_cm_from_mv_5(mv);
-//			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//			OLED_ShowString(24, 56, (uint8_t*)buf);
-//			OLED_Refresh_Gram();
-//			HAL_Delay(10);
-//
-//		} else { //if turn right
-//			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
-//			mv = (uint32_t)raw * 3300u / 4095u;
-//			s = dist_cm_from_mv_4(mv);
-//			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//			OLED_ShowString(24, 56, (uint8_t*)buf);
-//			OLED_Refresh_Gram();
-//			HAL_Delay(10);
-//		}
-//  	}
-//	HAL_Delay(500);
-//	if(arrow2=='L'){
-//	  	turn_by_angle_degrees(dir * -70, 1500, dir * -40); //u turn to parallel against the obstacle
-//	  	turn_by_angle_degrees(dir * -75, 1500, dir * -40);
-//	}
-//	else{
-//		turn_by_angle_degrees(dir * -70, 1500, dir * -30); //u turn to parallel against the obstacle
-//		turn_by_angle_degrees(dir * -75, 1500, dir * -30);
-//	}
-//
-//  	Motor_forward(1000); //Move forward
-//  	HAL_Delay(1000);
-//	// Inline IR read
-//	for(i=0;i<10;i++){ //Discard first 50
-//		if (dir == 1) { //Turn left
-//			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
-//			mv = (uint32_t)raw * 3300u / 4095u;
-//			s = dist_cm_from_mv_5(mv);
-//			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//			OLED_ShowString(24, 56, (uint8_t*)buf);
-//			OLED_Refresh_Gram();
-//			HAL_Delay(10);
-//		} else { //Turn right
-//			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
-//			mv = (uint32_t)raw * 3300u / 4095u;
-//			s = dist_cm_from_mv_4(mv);
-//			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//			OLED_ShowString(24, 56, (uint8_t*)buf);
-//			OLED_Refresh_Gram();
-//			HAL_Delay(10);
-//		}
-//	}
-//
-//
-//	while (s < 15) { //Continue reading IR till it senses the exit point
-//		if (dir > 0) { //if turn left
-//			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
-//			mv = (uint32_t)raw * 3300u / 4095u;
-//			s = dist_cm_from_mv_5(mv);
-//			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//			OLED_ShowString(24, 56, (uint8_t*)buf);
-//			OLED_Refresh_Gram();
-//			HAL_Delay(10);
-//
-//		} else { //if turn right
-//			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
-//			mv = (uint32_t)raw * 3300u / 4095u;
-//			s = dist_cm_from_mv_4(mv);
-//			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-//			OLED_ShowString(24, 56, (uint8_t*)buf);
-//			OLED_Refresh_Gram();
-//			HAL_Delay(10);
-//		}
-//	}
-//	HAL_Delay(500);
-//	turn_by_angle_degrees(dir * -70, 1500, dir * -30); //u turn to parallel against the obstacle, facing the start
-//	HAL_Delay(1000);
-//
-//
-//	//============================= Returning Algorithm ====================================
-//	OLED_Clear();
-//
-//	sprintf(buf, "Travel: %.1fcm", travelled_cm);
-//	OLED_ShowString(0, 0,  (uint8_t*)buf);
-//
-//	sprintf(buf, "Target: %.1fcm", target_dist);   // or target_cm if that's your var
-//	OLED_ShowString(0, 16, (uint8_t*)buf);
-//
-//	float total_cm = travelled_cm + target_dist + 30.0;    // combined
-//	sprintf(buf, "Total : %.1fcm", total_cm);
-//	OLED_ShowString(0, 32, (uint8_t*)buf);
-//
-//	OLED_Refresh_Gram();
-//	HAL_Delay(3000);
-//	run_straight_to_distance_cm_MAG(total_cm,1000); //+10 for the total length of first obs
-//	turn_by_angle_degrees(dir * -70, 1500, dir * -30); //turn
-//	turn_by_angle_degrees(dir * 70, 1500, dir * 30); //turn to face starting
-//	Motor_forward(1000);
-//	dist_cm = HCSR04_Read(); //Keep on turning until it sense the first obstacle
-//	while (dist_cm >10){
-//		dist_cm = HCSR04_Read();
-//		sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
-//		OLED_ShowString(24, 56, (uint8_t*)buf);
-//		OLED_Refresh_Gram();
-//	}
-//	Motor_stop();
-//  	HAL_Delay(50000);
+  //-------------------------------Task2-----------------------------------------
+  int dir = 0; //1 for left, -1 for right
+
+  //=======================Obstacle 1==================================
+      //Only obstacle 1 can use diamond as it is a known 10x10 obstacle
+  	Steering_ToUS(0);
+  	int current_pwm = 2200;
+  	Motor_set_pwm(current_pwm, current_pwm); //Move till ultrasonic
+  	int32_t dist_cm = 999;
+  	dist_cm = HCSR04_Read();
+  	pid_state_reset();
+	target_heading_rad = 0.0f * M_PI / 180.0f;
+
+	OLED_ShowString(48, 0, (uint8_t*)"1: Approach OBS1");
+	OLED_Refresh_Gram();
+  	while (dist_cm> 20) {
+  		dist_cm = HCSR04_Read();
+  		sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
+  		OLED_ShowString(24, 56, (uint8_t*)buf);
+  		OLED_Refresh_Gram();
+  		pid_control_cycle(target_heading_rad, current_pwm);
+  	} //Stop when distance less than 35
+  	Motor_stop();
+  	dist_cm = 999; //reset
+  	char arrow1 = 'R';
+  	//------------------------Get Camera response--------------------------------------
+  	/*
+  	// Send "SNAP" to RPi and wait for arrow
+  	const char *snap = "SNAP\n";
+  	HAL_UART_Transmit(&huart3, (uint8_t*)snap, (uint16_t)strlen(snap), HAL_MAX_DELAY);
+  	uint8_t rx = 0;
+  	uint32_t t0 = HAL_GetTick(); //Get current time
+  	char arrow1 = 'L'; //Default left
+  	while ((HAL_GetTick() - t0) < 12) { //4s timeout
+  		if (HAL_UART_Receive(&huart3, &rx, 1, 50) == HAL_OK) {
+  			if (rx == 'L' || rx == 'R') {
+  				arrow1 = (char)rx;
+  				break;
+  			}
+  		}
+  	}
+  	*/
+  	// ------------------------------------------------------------------------------------
+  	// === Run diamond shaped using IR ===
+  	if (arrow1 == 'R'){
+  		dir = 1;
+  	}
+  	else if (arrow1 == 'L'){
+  		dir = -1;
+  	}
+  	//Do manual turnings
+
+  	turn_by_angle_degrees(dir *25,2000,dir*30);
+  	pid_state_reset();
+  	int pwm = 1000;
+  	Motor_forward(pwm);
+
+  	uint16_t raw;
+  	uint32_t mv;
+  	float s;
+
+  	// Inline IR read
+	if (dir == 1) { //Turn left
+		raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
+		mv = (uint32_t)raw * 3300u / 4095u;
+		s = dist_cm_from_mv_5(mv);
+		sprintf(buf, "%3lu cm   ", (unsigned long)s);
+		OLED_ShowString(24, 56, (uint8_t*)buf);
+		OLED_Refresh_Gram();
+		pid_control_cycle(target_heading_rad, pwm)
+		HAL_Delay(10);
+	} else { //Turn right
+		raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
+		mv = (uint32_t)raw * 3300u / 4095u;
+		s = dist_cm_from_mv_4(mv);
+		sprintf(buf, "%3lu cm   ", (unsigned long)s);
+		OLED_ShowString(24, 56, (uint8_t*)buf);
+		OLED_Refresh_Gram();
+		pid_control_cycle(target_heading_rad, pwm)
+		HAL_Delay(10);
+	}
+  	while (s>15) { //Continue reading IR till it senses the obstacle
+  		if (dir == 1) {
+  			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5);
+  			mv = (uint32_t)raw * 3300u / 4095u;
+  			s = dist_cm_from_mv_5(mv); //Get distance
+  			sprintf(buf, "%3lu cm   ", (unsigned long)s);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+			pid_control_cycle(target_heading_rad, pwm)
+			HAL_Delay(10);
+  		} else {
+  			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4);
+  			mv = (uint32_t)raw * 3300u / 4095u;
+  			s = dist_cm_from_mv_4(mv); //Get distance
+  			sprintf(buf, "%3lu cm   ", (unsigned long)s);
+  			OLED_ShowString(24, 56, (uint8_t*)buf);
+  			OLED_Refresh_Gram();
+  			pid_control_cycle(target_heading_rad, pwm)
+  			HAL_Delay(10);
+  		}
+  	}
+  	Motor_stop();
+
+
+  	if (arrow1 == 'L'){ //Values that fckn works for left
+  		turn_by_angle_degrees(dir * -30, 1500, dir * -45); //Straighten
+  		run_straight_to_distance_cm_backward_MAG(10.0,2000);
+  		turn_by_angle_degrees(dir * -30, 1500, dir * -45); //Straighten
+  		//turn_by_angle_degrees(dir * 30, 1500, dir * 45); //Straighten
+  		turn_by_angle_degrees(dir * 10, 1500, dir * 45); //Straighten
+  		run_straight_to_distance_cm_backward_MAG(9.0,2000);
+  		turn_by_angle_degrees(dir * 10, 1500, dir * 45); //Straighten
+  	}
+  	else{
+  		turn_by_angle_degrees(dir * -30, 1600, dir * -25); //Straighten
+  		run_straight_to_distance_cm_backward_MAG(10.0,2000);
+  		turn_by_angle_degrees(dir * -30, 1600, dir * -25); //Straighten
+  		turn_by_angle_degrees(dir * 10, 1500, dir * 30); //Straighten
+		run_straight_to_distance_cm_backward_MAG(9.0,2000);
+		turn_by_angle_degrees(dir * 10, 1500, dir * 30); //Straighten
+  	}
+  	run_straight_to_distance_cm_backward_MAG(5.0,2000);
+  	run_straight_to_distance_cm_backward_MAG(5.0,2000);
+  	HAL_Delay(500);
+  	HAL_Delay(5000); //TODO: REMOVE
+
+  //=======================Obstacle 2==================================
+  	//Motor S
+  	char arrow2= 'R';
+  	float travelled_cm =0;
+  	//------------------------Get Camera response--------------------------------------
+  	// Send "SNAP" to RPi and wait for arrow
+  	/*
+  	const char *snap = "SNAP\n";
+  	HAL_UART_Transmit(&huart3, (uint8_t*)snap, (uint16_t)strlen(snap), HAL_MAX_DELAY);
+  	uint8_t rx = 0;
+  	uint32_t t1= HAL_GetTick(); //Get current time
+  	char arrow2= 'L'; //Default left
+  	while ((HAL_GetTick() - t1) < SNAP_TIMEOUT_MS) {
+  		if (HAL_UART_Receive(&huart3, &rx, 1, 50) == HAL_OK) {
+  			if (rx == 'L' || rx == 'R') {
+  				arrow = (char)rx;
+  				break;
+  			}
+  		}
+  	}
+  	*/
+  	// -----------------------------------------------------------------------------------
+  	float target_dist=0;
+  	if (arrow2 == 'R'){
+  		dir = 1;
+  		target_dist = 30.0;
+
+  	}
+  	else if (arrow2 == 'L'){
+  		dir = -1;
+  		target_dist = 25.0;
+  	}
+
+  	//If we are too close to the second obstacle, move back till 50cm distance
+  	dist_cm = HCSR04_Read(); //Sanity Check
+  	if (dist_cm <target_dist){
+  		Motor_set_pwm_reverse(800,800);
+  		dist_cm = HCSR04_Read();
+  		while (dist_cm<target_dist) {
+  			dist_cm = HCSR04_Read();
+  			sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+		}
+  		Motor_stop();
+  		HAL_Delay(500);
+  	}
+  	else{ //Move forward till 30cm distance
+  		int32_t start_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+  		Motor_forward(1500);
+		while (dist_cm>target_dist) {
+			dist_cm = HCSR04_Read();
+			sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+		}
+		int32_t cur_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+		int32_t diff = cur_pos - start_pos;
+		travelled_cm = counts_to_cm(abs(diff));
+		Motor_stop();
+		HAL_Delay(500);
+  	}
+
+  	if (arrow2 == 'L'){ //Values that fckn works for left
+		turn_by_angle_degrees(dir * 65, 1500, dir * 30); //Pause after first obstacle
+	}
+	else{
+		turn_by_angle_degrees(dir * 65, 1600, dir * 40); //pause after second obstacle
+	}
+  	Motor_forward(1000); //Move forward
+  	// Inline IR read
+	for(i=0;i<10;i++){ //Discard first 10
+		if (dir == 1) { //Turn left
+			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
+			mv = (uint32_t)raw * 3300u / 4095u;
+			s = dist_cm_from_mv_5(mv);
+			sprintf(buf, "%3lu cm   ", (unsigned long)s);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+			HAL_Delay(10);
+		} else { //Turn right
+			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
+			mv = (uint32_t)raw * 3300u / 4095u;
+			s = dist_cm_from_mv_4(mv);
+			sprintf(buf, "%3lu cm   ", (unsigned long)s);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+			HAL_Delay(10);
+		}
+	}
+
+  	while (s<15) { //Continue reading IR till it senses the exit point
+  		if (dir > 0) { //if turn left
+			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
+			mv = (uint32_t)raw * 3300u / 4095u;
+			s = dist_cm_from_mv_5(mv);
+			sprintf(buf, "%3lu cm   ", (unsigned long)s);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+			HAL_Delay(10);
+
+		} else { //if turn right
+			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
+			mv = (uint32_t)raw * 3300u / 4095u;
+			s = dist_cm_from_mv_4(mv);
+			sprintf(buf, "%3lu cm   ", (unsigned long)s);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+			HAL_Delay(10);
+		}
+  	}
+	HAL_Delay(500);
+	if(arrow2=='L'){
+	  	turn_by_angle_degrees(dir * -70, 1500, dir * -40); //u turn to parallel against the obstacle
+	  	turn_by_angle_degrees(dir * -75, 1500, dir * -40);
+	}
+	else{
+		turn_by_angle_degrees(dir * -70, 1500, dir * -30); //u turn to parallel against the obstacle
+		turn_by_angle_degrees(dir * -75, 1500, dir * -30);
+	}
+
+  	Motor_forward(1000); //Move forward
+  	HAL_Delay(1000);
+	// Inline IR read
+	for(i=0;i<10;i++){ //Discard first 50
+		if (dir == 1) { //Turn left
+			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
+			mv = (uint32_t)raw * 3300u / 4095u;
+			s = dist_cm_from_mv_5(mv);
+			sprintf(buf, "%3lu cm   ", (unsigned long)s);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+			HAL_Delay(10);
+		} else { //Turn right
+			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
+			mv = (uint32_t)raw * 3300u / 4095u;
+			s = dist_cm_from_mv_4(mv);
+			sprintf(buf, "%3lu cm   ", (unsigned long)s);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+			HAL_Delay(10);
+		}
+	}
+
+
+	while (s < 15) { //Continue reading IR till it senses the exit point
+		if (dir > 0) { //if turn left
+			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
+			mv = (uint32_t)raw * 3300u / 4095u;
+			s = dist_cm_from_mv_5(mv);
+			sprintf(buf, "%3lu cm   ", (unsigned long)s);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+			HAL_Delay(10);
+
+		} else { //if turn right
+			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
+			mv = (uint32_t)raw * 3300u / 4095u;
+			s = dist_cm_from_mv_4(mv);
+			sprintf(buf, "%3lu cm   ", (unsigned long)s);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+			HAL_Delay(10);
+		}
+	}
+	HAL_Delay(500);
+	turn_by_angle_degrees(dir * -70, 1500, dir * -30); //u turn to parallel against the obstacle, facing the start
+	HAL_Delay(1000);
+
+
+	//============================= Returning Algorithm ====================================
+	OLED_Clear();
+
+	sprintf(buf, "Travel: %.1fcm", travelled_cm);
+	OLED_ShowString(0, 0,  (uint8_t*)buf);
+
+	sprintf(buf, "Target: %.1fcm", target_dist);   // or target_cm if that's your var
+	OLED_ShowString(0, 16, (uint8_t*)buf);
+
+	float total_cm = travelled_cm + target_dist + 30.0;    // combined
+	sprintf(buf, "Total : %.1fcm", total_cm);
+	OLED_ShowString(0, 32, (uint8_t*)buf);
+
+	OLED_Refresh_Gram();
+	HAL_Delay(3000);
+	run_straight_to_distance_cm(total_cm,1000); //+10 for the total length of first obs
+	turn_by_angle_degrees(dir * -70, 1500, dir * -30); //turn
+	turn_by_angle_degrees(dir * 70, 1500, dir * 30); //turn to face starting
+	Motor_forward(1000);
+	dist_cm = HCSR04_Read(); //Keep on turning until it sense the first obstacle
+	while (dist_cm >10){
+		dist_cm = HCSR04_Read();
+		sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
+		OLED_ShowString(24, 56, (uint8_t*)buf);
+		OLED_Refresh_Gram();
+	}
+	Motor_stop();
+  	HAL_Delay(50000);
 
 
 	  Command_t next_command;
