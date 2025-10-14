@@ -2097,7 +2097,6 @@ int main(void)
       //Only obstacle 1 can use diamond as it is a known 10x10 obstacle
   	Steering_ToUS(0);
   	int current_pwm = 2200;
-  	Motor_set_pwm(current_pwm, current_pwm); //Move till ultrasonic
   	int32_t dist_cm = 999;
   	dist_cm = HCSR04_Read();
   	pid_state_reset();
@@ -2105,7 +2104,8 @@ int main(void)
 
 	OLED_ShowString(48, 0, (uint8_t*)"1: Approach OBS1");
 	OLED_Refresh_Gram();
-  	while (dist_cm> 20) {
+	Motor_set_pwm(current_pwm, current_pwm); //Move till ultrasonic
+  	while (dist_cm> 27) {
   		dist_cm = HCSR04_Read();
   		sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
   		OLED_ShowString(24, 56, (uint8_t*)buf);
