@@ -1864,7 +1864,7 @@ void pid_state_reset(void) {
     g_speed_last_error = 0.0f;
 
     // Initialize fused heading to match current global heading
-    g_fused_heading_rad = g_robot_heading * M_PI / 180.0f;
+    g_fused_heading_rad = 0.0 * M_PI / 180.0f;
 
     g_last_time = HAL_GetTick();
     g_prev_left_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
@@ -1897,7 +1897,7 @@ pid_control_cycle(float target_heading_rad, int base_pwm) {
 
     if (g_fused_heading_rad > M_PI) g_fused_heading_rad -= 2.0f * M_PI;
     if (g_fused_heading_rad < -M_PI) g_fused_heading_rad += 2.0f * M_PI;
-    g_robot_heading = g_fused_heading_rad * 180.0f / M_PI; // Update global state
+    //g_robot_heading = g_fused_heading_rad * 180.0f / M_PI; // Update global state
 
     // --- Heading PID ---
     float heading_error = target_heading_rad - g_fused_heading_rad;
@@ -1918,7 +1918,7 @@ pid_control_cycle(float target_heading_rad, int base_pwm) {
     g_prev_left_counts = left_counts;
     g_prev_right_counts = right_counts;
 
-    update_coordinates(incremental_dist_cm); // Update odometry state
+    //update_coordinates(incremental_dist_cm); // Update odometry state
 
     float speed_error = (float)(left_delta - right_delta);
     g_speed_integral += speed_error * dt;
@@ -1947,8 +1947,8 @@ pid_control_cycle(float target_heading_rad, int base_pwm) {
 
     // --- OLED Update ---
     OLED_Clear();
-    sprintf(buf, "Hdg: %.1f X:%.1f Y:%.1f", g_robot_heading, g_robot_x, g_robot_y);
-    OLED_ShowString(0, 0, (uint8_t*)buf);
+    //sprintf(buf, "Hdg: %.1f X:%.1f Y:%.1f", g_robot_heading, g_robot_x, g_robot_y);
+    //OLED_ShowString(0, 0, (uint8_t*)buf);
     sprintf(buf, "L:%d R:%d I_H:%.1f", left_pwm, right_pwm, g_heading_integral);
     OLED_ShowString(16, 0, (uint8_t*)buf);
     OLED_Refresh_Gram();
@@ -2114,24 +2114,22 @@ int main(void)
   	} //Stop when distance less than 35
   	Motor_stop();
   	dist_cm = 999; //reset
-  	char arrow1 = 'R';
+  	char arrow1 = 'R'; //default right
   	//------------------------Get Camera response--------------------------------------
-  	/*
+
   	// Send "SNAP" to RPi and wait for arrow
-  	const char *snap = "SNAP\n";
+  	const char *snap = "SNAP_\n";
   	HAL_UART_Transmit(&huart3, (uint8_t*)snap, (uint16_t)strlen(snap), HAL_MAX_DELAY);
   	uint8_t rx = 0;
   	uint32_t t0 = HAL_GetTick(); //Get current time
-  	char arrow1 = 'L'; //Default left
-  	while ((HAL_GetTick() - t0) < 12) { //4s timeout
-  		if (HAL_UART_Receive(&huart3, &rx, 1, 50) == HAL_OK) {
-  			if (rx == 'L' || rx == 'R') {
-  				arrow1 = (char)rx;
-  				break;
-  			}
-  		}
-  	}
-  	*/
+  	//char arrow1 = 'L'; //Default left
+  	if (HAL_UART_Receive(&huart3, &rx, 1, 1000) == HAL_OK) {
+		if (rx == 'L' || rx == 'R') {
+			arrow1 = (char)rx;
+		}
+	}
+
+
   	// ------------------------------------------------------------------------------------
   	// === Run diamond shaped using IR ===
   	if (arrow1 == 'R'){
@@ -2159,7 +2157,7 @@ int main(void)
 		sprintf(buf, "%3lu cm   ", (unsigned long)s);
 		OLED_ShowString(24, 56, (uint8_t*)buf);
 		OLED_Refresh_Gram();
-		pid_control_cycle(target_heading_rad, pwm)
+		pid_control_cycle(target_heading_rad, pwm);
 		HAL_Delay(10);
 	} else { //Turn right
 		raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
@@ -2168,7 +2166,7 @@ int main(void)
 		sprintf(buf, "%3lu cm   ", (unsigned long)s);
 		OLED_ShowString(24, 56, (uint8_t*)buf);
 		OLED_Refresh_Gram();
-		pid_control_cycle(target_heading_rad, pwm)
+		pid_control_cycle(target_heading_rad, pwm);
 		HAL_Delay(10);
 	}
   	while (s>15) { //Continue reading IR till it senses the obstacle
@@ -2179,7 +2177,7 @@ int main(void)
   			sprintf(buf, "%3lu cm   ", (unsigned long)s);
 			OLED_ShowString(24, 56, (uint8_t*)buf);
 			OLED_Refresh_Gram();
-			pid_control_cycle(target_heading_rad, pwm)
+			pid_control_cycle(target_heading_rad, pwm);
 			HAL_Delay(10);
   		} else {
   			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4);
@@ -2188,7 +2186,7 @@ int main(void)
   			sprintf(buf, "%3lu cm   ", (unsigned long)s);
   			OLED_ShowString(24, 56, (uint8_t*)buf);
   			OLED_Refresh_Gram();
-  			pid_control_cycle(target_heading_rad, pwm)
+  			pid_control_cycle(target_heading_rad, pwm);
   			HAL_Delay(10);
   		}
   	}
@@ -2219,25 +2217,22 @@ int main(void)
 
   //=======================Obstacle 2==================================
   	//Motor S
-  	char arrow2= 'R';
+  	char arrow2= 'R'; // default right
   	float travelled_cm =0;
   	//------------------------Get Camera response--------------------------------------
   	// Send "SNAP" to RPi and wait for arrow
-  	/*
-  	const char *snap = "SNAP\n";
+
+  	//const char *snap = "SNAP_\n";
   	HAL_UART_Transmit(&huart3, (uint8_t*)snap, (uint16_t)strlen(snap), HAL_MAX_DELAY);
-  	uint8_t rx = 0;
+  	//uint8_t rx = 0;
   	uint32_t t1= HAL_GetTick(); //Get current time
-  	char arrow2= 'L'; //Default left
-  	while ((HAL_GetTick() - t1) < SNAP_TIMEOUT_MS) {
-  		if (HAL_UART_Receive(&huart3, &rx, 1, 50) == HAL_OK) {
-  			if (rx == 'L' || rx == 'R') {
-  				arrow = (char)rx;
-  				break;
-  			}
-  		}
-  	}
-  	*/
+  	if (HAL_UART_Receive(&huart3, &rx, 1, 1000) == HAL_OK) {
+		if (rx == 'L' || rx == 'R') {
+			arrow2 = (char)rx;
+		}
+	}
+
+
   	// -----------------------------------------------------------------------------------
   	float target_dist=0;
   	if (arrow2 == 'R'){
@@ -2266,12 +2261,16 @@ int main(void)
   	}
   	else{ //Move forward till 30cm distance
   		int32_t start_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
-  		Motor_forward(1500);
+  		pid_state_reset();
+  		current_pwm = 1500;
+  		Motor_forward(current_pwm);
 		while (dist_cm>target_dist) {
 			dist_cm = HCSR04_Read();
 			sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
 			OLED_ShowString(24, 56, (uint8_t*)buf);
 			OLED_Refresh_Gram();
+			pid_control_cycle(target_heading_rad, current_pwm);
+
 		}
 		int32_t cur_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
 		int32_t diff = cur_pos - start_pos;
@@ -2286,7 +2285,9 @@ int main(void)
 	else{
 		turn_by_angle_degrees(dir * 65, 1600, dir * 40); //pause after second obstacle
 	}
-  	Motor_forward(1000); //Move forward
+  	current_pwm = 1000;
+  	pid_state_reset();
+  	Motor_forward(current_pwm); //Move forward
   	// Inline IR read
 	for(i=0;i<10;i++){ //Discard first 10
 		if (dir == 1) { //Turn left
@@ -2296,6 +2297,7 @@ int main(void)
 			sprintf(buf, "%3lu cm   ", (unsigned long)s);
 			OLED_ShowString(24, 56, (uint8_t*)buf);
 			OLED_Refresh_Gram();
+			pid_control_cycle(target_heading_rad, current_pwm);
 			HAL_Delay(10);
 		} else { //Turn right
 			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
@@ -2304,6 +2306,7 @@ int main(void)
 			sprintf(buf, "%3lu cm   ", (unsigned long)s);
 			OLED_ShowString(24, 56, (uint8_t*)buf);
 			OLED_Refresh_Gram();
+			pid_control_cycle(target_heading_rad, current_pwm);
 			HAL_Delay(10);
 		}
 	}
@@ -2316,6 +2319,7 @@ int main(void)
 			sprintf(buf, "%3lu cm   ", (unsigned long)s);
 			OLED_ShowString(24, 56, (uint8_t*)buf);
 			OLED_Refresh_Gram();
+			pid_control_cycle(target_heading_rad, current_pwm);
 			HAL_Delay(10);
 
 		} else { //if turn right
@@ -2325,6 +2329,7 @@ int main(void)
 			sprintf(buf, "%3lu cm   ", (unsigned long)s);
 			OLED_ShowString(24, 56, (uint8_t*)buf);
 			OLED_Refresh_Gram();
+			pid_control_cycle(target_heading_rad, current_pwm);
 			HAL_Delay(10);
 		}
   	}
@@ -2338,7 +2343,9 @@ int main(void)
 		turn_by_angle_degrees(dir * -75, 1500, dir * -30);
 	}
 
-  	Motor_forward(1000); //Move forward
+	pid_state_reset();
+	current_pwm = 1000;
+  	Motor_forward(current_pwm); //Move forward
   	HAL_Delay(1000);
 	// Inline IR read
 	for(i=0;i<10;i++){ //Discard first 50
@@ -2348,7 +2355,9 @@ int main(void)
 			s = dist_cm_from_mv_5(mv);
 			sprintf(buf, "%3lu cm   ", (unsigned long)s);
 			OLED_ShowString(24, 56, (uint8_t*)buf);
+			pid_control_cycle(target_heading_rad, current_pwm);
 			OLED_Refresh_Gram();
+
 			HAL_Delay(10);
 		} else { //Turn right
 			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
@@ -2357,6 +2366,7 @@ int main(void)
 			sprintf(buf, "%3lu cm   ", (unsigned long)s);
 			OLED_ShowString(24, 56, (uint8_t*)buf);
 			OLED_Refresh_Gram();
+			pid_control_cycle(target_heading_rad, current_pwm);
 			HAL_Delay(10);
 		}
 	}
@@ -2370,6 +2380,7 @@ int main(void)
 			sprintf(buf, "%3lu cm   ", (unsigned long)s);
 			OLED_ShowString(24, 56, (uint8_t*)buf);
 			OLED_Refresh_Gram();
+			pid_control_cycle(target_heading_rad, current_pwm);
 			HAL_Delay(10);
 
 		} else { //if turn right
@@ -2379,6 +2390,7 @@ int main(void)
 			sprintf(buf, "%3lu cm   ", (unsigned long)s);
 			OLED_ShowString(24, 56, (uint8_t*)buf);
 			OLED_Refresh_Gram();
+			pid_control_cycle(target_heading_rad, current_pwm);
 			HAL_Delay(10);
 		}
 	}
@@ -2405,12 +2417,16 @@ int main(void)
 	run_straight_to_distance_cm(total_cm,1000); //+10 for the total length of first obs
 	turn_by_angle_degrees(dir * -70, 1500, dir * -30); //turn
 	turn_by_angle_degrees(dir * 70, 1500, dir * 30); //turn to face starting
-	Motor_forward(1000);
+	pid_state_reset();
+	current_pwm = 1000;
+	Motor_forward(current_pwm);
+
 	dist_cm = HCSR04_Read(); //Keep on turning until it sense the first obstacle
 	while (dist_cm >10){
 		dist_cm = HCSR04_Read();
 		sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
 		OLED_ShowString(24, 56, (uint8_t*)buf);
+		pid_control_cycle(target_heading_rad, current_pwm);
 		OLED_Refresh_Gram();
 	}
 	Motor_stop();
