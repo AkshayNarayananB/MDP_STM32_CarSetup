@@ -1049,6 +1049,11 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
         if (fabs(heading) >= fabs(target_angle))
         {
             Motor_stop();
+            HAL_Delay(100);
+            if (steer_angle > 0){
+            	Steering_ToUS(-45.0);
+            	HAL_Delay(200);
+            }
             Steering_ToUS(0.0);
             break;
         }
@@ -2105,7 +2110,7 @@ int main(void)
 	OLED_ShowString(48, 0, (uint8_t*)"1: Approach OBS1");
 	OLED_Refresh_Gram();
 	Motor_set_pwm(current_pwm, current_pwm); //Move till ultrasonic
-  	while (dist_cm> 31) {
+  	while (dist_cm> 35) {
   		dist_cm = HCSR04_Read();
   		sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
   		OLED_ShowString(24, 56, (uint8_t*)buf);
@@ -2162,59 +2167,19 @@ int main(void)
   		dir = -1;
   	}
   	//Do manual turnings
-  	
-  	turn_by_angle_degrees(dir *25,2000,dir*30);
+  	if (dir == -1){
+  		turn_by_angle_degrees(dir *25,2000,dir*30);
+  	}
+  	else{
+  		turn_by_angle_degrees(dir *20,2000,dir*40);
+  	}
   	pid_state_reset();
   	int pwm = 1000;
-  	Motor_forward(pwm);
+  	//Motor_forward(pwm);
 
   	uint16_t raw;
   	uint32_t mv;
   	float s;
-
-  	// Inline IR read
-	if (dir == 1) { //Turn left
-		raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
-		mv = (uint32_t)raw * 3300u / 4095u;
-		s = dist_cm_from_mv_5(mv);
-		sprintf(buf, "%3lu cm   ", (unsigned long)s);
-		OLED_ShowString(24, 56, (uint8_t*)buf);
-		OLED_Refresh_Gram();
-		pid_control_cycle(target_heading_rad, pwm);
-		HAL_Delay(10);
-	} else { //Turn right
-		raw = adc_read_channel(&hadc1, ADC_CHANNEL_4); //Left IR sensor get ready
-		mv = (uint32_t)raw * 3300u / 4095u;
-		s = dist_cm_from_mv_4(mv);
-		sprintf(buf, "%3lu cm   ", (unsigned long)s);
-		OLED_ShowString(24, 56, (uint8_t*)buf);
-		OLED_Refresh_Gram();
-		pid_control_cycle(target_heading_rad, pwm);
-		HAL_Delay(10);
-	}
-  	while (s>15) { //Continue reading IR till it senses the obstacle
-  		if (dir == 1) {
-  			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5);
-  			mv = (uint32_t)raw * 3300u / 4095u;
-  			s = dist_cm_from_mv_5(mv); //Get distance
-  			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-			OLED_ShowString(24, 56, (uint8_t*)buf);
-			OLED_Refresh_Gram();
-			pid_control_cycle(target_heading_rad, pwm);
-			HAL_Delay(10);
-  		} else {
-  			raw = adc_read_channel(&hadc1, ADC_CHANNEL_4);
-  			mv = (uint32_t)raw * 3300u / 4095u;
-  			s = dist_cm_from_mv_4(mv); //Get distance
-  			sprintf(buf, "%3lu cm   ", (unsigned long)s);
-  			OLED_ShowString(24, 56, (uint8_t*)buf);
-  			OLED_Refresh_Gram();
-  			pid_control_cycle(target_heading_rad, pwm);
-  			HAL_Delay(10);
-  		}
-  	}
-  	Motor_stop();
-
 
   	if (arrow1 == 'L'){ //Values that fckn works for left
   		turn_by_angle_degrees(dir * -35, 1500, dir * -25); //Straighten
@@ -2243,7 +2208,7 @@ int main(void)
   	//Motor S
   	char arrow2= 'L'; // default right
   	float target_dist=0;
-  /*
+
   	HAL_UART_Transmit(&huart3, (uint8_t*)snap, (uint16_t)strlen(snap), HAL_MAX_DELAY);
 
 	int while2 = 0;
@@ -2264,7 +2229,7 @@ int main(void)
 			}
 		}
 	}
-*/
+
   	HAL_Delay(1000);
   	if (arrow2 == 'R'){
   		dir = 1;
@@ -2273,7 +2238,7 @@ int main(void)
   	}
   	else if (arrow2 == 'L'){
   		dir = -1;
-  		target_dist = 25.0;
+  		target_dist = 27.0;
   	}
 
   	float travelled_cm =0;
@@ -2371,22 +2336,21 @@ int main(void)
 	//HAL_Delay(500);
 	if(arrow2=='L'){
 	  	turn_by_angle_degrees(dir * -70, 1500, dir * -40); //u turn to parallel against the obstacle
-	  	run_straight_to_distance_cm_backward_MAG(15.0,2000);
+	  	run_straight_to_distance_cm_backward_MAG(22.0,2000);
 	  	turn_by_angle_degrees(dir * -70, 1500, dir * -40);
 	}
 	else{
 		turn_by_angle_degrees(dir * -70, 1500, dir * -30); //u turn to parallel against the obstacle
-		Motor_reverse(1000);
-		HAL_Delay(1500);
+		run_straight_to_distance_cm_backward_MAG(22.0,2000);
 		turn_by_angle_degrees(dir * -75, 1500, dir * -30);
 	}
 
 	pid_state_reset();
 	current_pwm = 2000;
   	Motor_forward(current_pwm); //Move forward
-  	HAL_Delay(2000);
+  	HAL_Delay(1000);
 	// Inline IR read
-	for(i=0;i<10;i++){ //Discard first 50
+	for(i=0;i<3;i++){ //Discard first 3
 		if (dir == 1) { //Turn left
 			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
 			mv = (uint32_t)raw * 3300u / 4095u;
@@ -2449,7 +2413,8 @@ int main(void)
 	OLED_ShowString(0, 32, (uint8_t*)buf);
 
 	OLED_Refresh_Gram();
-	run_straight_to_distance_cm(total_cm,1000); //+10 for the total length of first obs
+	pid_state_reset();
+	run_straight_to_distance_cm_MAG(total_cm,2000); //+10 for the total length of first obs
 	turn_by_angle_degrees(dir * -70, 1500, dir * -30); //turn
 	turn_by_angle_degrees(dir * 70, 1500, dir * 30); //turn to face starting
 	pid_state_reset();
