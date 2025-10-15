@@ -822,8 +822,6 @@ void run_straight_to_distance_cm_MAG(float target_cm, int base_pwm)
 }
 
 
-
-
 void run_straight_to_distance_cm(float target_cm, int base_pwm)
 {
     // --- Static variables persist across loop calls ---
