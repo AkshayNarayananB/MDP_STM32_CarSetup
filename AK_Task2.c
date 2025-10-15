@@ -1073,12 +1073,12 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
             Motor_stop();
             HAL_Delay(300);
             if(dir == 0){
-            	Steering_ToUS(-40.0);
+            	__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 700);
             	HAL_Delay(200);
-            	Steering_ToUS(0.0);
+            	__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1190);
             	HAL_Delay(200);
             }
-            Steering_ToUS(0.0);
+            __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1190);
             break;
         }
 
@@ -1093,7 +1093,7 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
     Motor_stop();
 	HAL_Delay(300);
 	if(dir == 0){
-		Steering_ToUS(-40.0);
+		Steering_ToUS(-35.0);
 		HAL_Delay(200);
 		Steering_ToUS(0.0);
 		HAL_Delay(200);
@@ -2136,17 +2136,11 @@ int main(void)
         HAL_Delay(5);
   }
   gyro_bias = gyro_bias_sum / num_cal_samples;
-  int dir = 1.0f;
+  int dir = -1.0f;
 
   // -- Path Sample Functions -- //
 
   OLED_Clear();
-  turn_by_angle_degrees(dir *12,3500,dir*25);
-  HAL_Delay(3000);
-
-  turn_by_angle_degrees(dir * -60, 3500, dir * -30); //Straighten
-  run_straight_to_distance_cm_backward_MAG(5.0,2000);
-  turn_by_angle_degrees(dir * 15, 1600, dir * 20); //Straighten
 	//run_straight_to_distance_cm_MAG(10.0, 1500);
 	//turn_by_angle_degrees(dir * 10, 1500, dir * 30); //Straighten
 	//run_straight_to_distance_cm_backward_MAG(9.0,2000);
@@ -2204,7 +2198,7 @@ int main(void)
 	OLED_ShowString(48, 0, (uint8_t*)"1: Approach OBS1");
 	OLED_Refresh_Gram();
 	Motor_set_pwm(current_pwm, current_pwm); //Move till ultrasonic
-  	while (dist_cm> 39) {
+  	while (dist_cm> 45) {
   		dist_cm = HCSR04_Read();
 //  		sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
 //  		OLED_ShowString(24, 56, (uint8_t*)buf);
@@ -2242,9 +2236,6 @@ int main(void)
 		}
 	}
 
-
-
-
 		// If neither "LEFT_" nor "RIGHT" was received, the loop continues (goes back to HAL_UART_Receive)
 		// and waits for the next set of 5 characters./ An infinite loop that is only exited by the 'break' statement
 	//HAL_Delay(8000);
@@ -2259,10 +2250,10 @@ int main(void)
   	}
   	//Do manual turnings
   	if (dir == -1){
-  		turn_by_angle_degrees(dir *25,2000,dir*30);
+  		turn_by_angle_degrees(dir *10,3000,dir*25);
   	}
   	else{
-  		turn_by_angle_degrees(dir *20,3500,dir*20);
+  		turn_by_angle_degrees(dir *10,3500,dir*25);
   	}
   	pid_state_reset();
   	int pwm = 1000;
@@ -2273,24 +2264,20 @@ int main(void)
   	float s;
 
   	if (arrow1 == 'L'){ //Values that fckn works for left
-  		turn_by_angle_degrees(dir * -35, 3500, dir * -25); //Straighten
-  		run_straight_to_distance_cm_backward_MAG(10.0,2000);
-  		turn_by_angle_degrees(dir * -30, 1500, dir * -25); //Straighten
-  		run_straight_to_distance_cm_MAG(5.0, 1500);
-  		turn_by_angle_degrees(dir * 10, 1500, dir * 30); //Straighten
-  		run_straight_to_distance_cm_backward_MAG(8.0,2000);
-  		turn_by_angle_degrees(dir * 10, 1500, dir * 30); //Straighten
+  	  turn_by_angle_degrees(dir * -65, 3700, dir * -35); //Straighten
+  	  run_straight_to_distance_cm_backward_MAG(20.0,2000);
+  	  turn_by_angle_degrees(dir * 48, 1600, dir * 35); //Straighten
+  	  HAL_Delay(1000);
+  	  run_straight_to_distance_cm_backward_MAG(20.0,2000);
+  	  //HAL_Delay(2000);
   	}
   	else{
-  		turn_by_angle_degrees(dir * -20, 3500, dir * -20); //Straighten
-  		run_straight_to_distance_cm_backward_MAG(10.0,2000);
-  		turn_by_angle_degrees(dir * -30, 1600, dir * -25); //Straighten
-  		run_straight_to_distance_cm_MAG(10.0, 1500);
-  		turn_by_angle_degrees(dir * 10, 1500, dir * 30); //Straighten
-		run_straight_to_distance_cm_backward_MAG(9.0,2000);
-  		turn_by_angle_degrees(dir * -15, 3500, dir * -25);
-  		__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1100);HAL_Delay(800);
-  		run_straight_to_distance_cm_MAG(30.0, 3000); HAL_Delay(2000);
+  	  turn_by_angle_degrees(dir * -65, 3700, dir * -35); //Straighten
+  	  run_straight_to_distance_cm_backward_MAG(20.0,2000);
+  	  turn_by_angle_degrees(dir * 65, 1600, dir * 40); //Straighten
+  	  HAL_Delay(1000);
+  	  run_straight_to_distance_cm_backward_MAG(20.0,2000);
+  	  //HAL_Delay(2000);
 
   	}
   	run_straight_to_distance_cm_backward_MAG(5.0,2000);
@@ -2367,6 +2354,20 @@ int main(void)
   		dir = -1;
   		target_dist = 27.0;
   	}
+
+  	//If we are too close to the second obstacle, move back till 50cm distance
+	dist_cm = HCSR04_Read(); //Sanity Check
+	if (dist_cm <target_dist){
+		Motor_set_pwm_reverse(800,800);
+		dist_cm = HCSR04_Read();
+		while (dist_cm<target_dist) {
+			dist_cm = HCSR04_Read();
+			sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
+			OLED_ShowString(24, 56, (uint8_t*)buf);
+			OLED_Refresh_Gram();
+	}
+	Motor_stop();
+	HAL_Delay(500);
 
 
 	// -----------------------------------------------------------------------------------
