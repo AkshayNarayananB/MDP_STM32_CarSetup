@@ -703,7 +703,7 @@ void run_straight_to_distance_cm_MAG(float target_cm, int base_pwm)
     const float slow_down_cm = 5.0f;
     const float creep_cm = 1.0f;
 
-    float Kp_h = 40.0f, Ki_h = 5.0f, Kd_h = 3.5f;
+    float Kp_h = 45.0f, Ki_h = 7.5f, Kd_h = 3.5f;
     float Kp_e = 2.0f, Ki_e = 0.04f, Kd_e = 0.1f;
     char buf[50];
 
