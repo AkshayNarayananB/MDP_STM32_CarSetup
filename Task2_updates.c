@@ -65,8 +65,8 @@ uint16_t Steering_ToUS(int16_t steer_angle)
     if (steer_angle >  45) steer_angle =  45;
 
     if(steer_angle == 0){
-    	__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1190);
-    	return 1180;
+    	__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1200);
+    	return 1200;
     }
 
     // Original formula: 1150 + steer_angle * (1900 / 90)
@@ -996,114 +996,114 @@ void run_straight_to_distance_cm(float target_cm, int base_pwm)
  * A positive value for right turns, negative for left turns.
  */
 
-void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
-{
-    // --- PID state variables ---
-    float heading = 0.0f;
-    float gz_filtered = 0.0f;
-    uint32_t last_time = HAL_GetTick();
-    uint16_t dir = 0;
-
-    // Raw sensor variables for reading
-    int16_t ax, ay, az, gx, gy, gz;
-    float ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps;
-
-    // --- Ensure steer_angle aligns with target_angle direction ---
-    // If target is positive (right turn), ensure steer_angle is positive.
-    // If target is negative (left turn), ensure steer_angle is negative.
-    if (target_angle > 0 && steer_angle < 0) {
-        steer_angle = -steer_angle;
-    } else if (target_angle < 0 && steer_angle > 0) {
-        steer_angle = -steer_angle;
-        dir = 1.0f;
-    }
-
-    // Ensure the steer_angle is within the safe range
-    if (steer_angle > 45.0f) steer_angle = 45.0f;
-    if (steer_angle < -45.0f) steer_angle = -45.0f;
-
-    // Set the steering angle
-    Steering_ToUS(steer_angle);
-    Motor_set_pwm(base_pwm, base_pwm);
-
-     // --- Read and scale gyroscope data ---
-	 ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
-	 gz_dps = gz / 131.0f;
-
-	 // --- Δt calculation ---
-	 uint32_t now = HAL_GetTick();
-	 float dt = (now - last_time) / 1000.0f;
-	 if (dt <= 0) dt = 0.001f;
-	 last_time = now;
-
-	 // --- Gyro filtering & heading integration ---
-	  gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
-	  heading += gz_filtered * dt;
-
-
-    // Prepare OLED display
-    OLED_Clear();
-    char buf[32];
-    sprintf(buf, "Target: %.1f deg", target_angle);
-    OLED_ShowString(0, 0, (uint8_t *)buf);
-    OLED_Refresh_Gram();
-
-    while (fabs(heading) < fabs(target_angle))
-    {
-        // --- Read and scale gyroscope data ---
-        ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
-        gz_dps = gz / 131.0f;
-
-        // --- Δt calculation ---
-        uint32_t now = HAL_GetTick();
-        float dt = (now - last_time) / 1000.0f;
-        if (dt <= 0) dt = 0.001f;
-        last_time = now;
-
-        // --- Gyro filtering & heading integration ---
-        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
-        heading += gz_filtered * dt;
-
-        // --- Check for completion ---
-        if (fabs(heading) >= fabs(target_angle))
-        {
-            Motor_stop();
-            HAL_Delay(300);
-            if(dir == 0){
-            	__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 700);
-            	HAL_Delay(200);
-            	__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1190);
-            	HAL_Delay(200);
-            }
-            __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1190);
-            break;
-        }
-
-        // --- Update current heading on OLED ---
-        sprintf(buf, "Current: %.1f deg", heading);
-        OLED_ShowString(0, 20, (uint8_t *)buf);
-        OLED_Refresh_Gram();
-
-        HAL_Delay(10); // ~100 Hz loop
-    }
-
-    Motor_stop();
-	HAL_Delay(300);
-	if(dir == 0){
-		Steering_ToUS(-35.0);
-		HAL_Delay(200);
-		Steering_ToUS(0.0);
-		HAL_Delay(200);
-	}
-	Steering_ToUS(0.0);
-
-    // --- Final OLED display after completion ---
-    OLED_Clear();
-    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
-    sprintf(buf, "Final Angle: %.1f", heading);
-    OLED_ShowString(0, 20, (uint8_t *)buf);
-    OLED_Refresh_Gram();
-}
+//void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
+//{
+//    // --- PID state variables ---
+//    float heading = 0.0f;
+//    float gz_filtered = 0.0f;
+//    uint32_t last_time = HAL_GetTick();
+//    uint16_t dir = 0;
+//
+//    // Raw sensor variables for reading
+//    int16_t ax, ay, az, gx, gy, gz;
+//    float ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps;
+//
+//    // --- Ensure steer_angle aligns with target_angle direction ---
+//    // If target is positive (right turn), ensure steer_angle is positive.
+//    // If target is negative (left turn), ensure steer_angle is negative.
+//    if (target_angle > 0 && steer_angle < 0) {
+//        steer_angle = -steer_angle;
+//    } else if (target_angle < 0 && steer_angle > 0) {
+//        steer_angle = -steer_angle;
+//        dir = 1.0f;
+//    }
+//
+//    // Ensure the steer_angle is within the safe range
+//    if (steer_angle > 45.0f) steer_angle = 45.0f;
+//    if (steer_angle < -45.0f) steer_angle = -45.0f;
+//
+//    // Set the steering angle
+//    Steering_ToUS(steer_angle);
+//    Motor_set_pwm(base_pwm, base_pwm);
+//
+//     // --- Read and scale gyroscope data ---
+//	 ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+//	 gz_dps = gz / 131.0f;
+//
+//	 // --- Δt calculation ---
+//	 uint32_t now = HAL_GetTick();
+//	 float dt = (now - last_time) / 1000.0f;
+//	 if (dt <= 0) dt = 0.001f;
+//	 last_time = now;
+//
+//	 // --- Gyro filtering & heading integration ---
+//	  gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+//	  heading += gz_filtered * dt;
+//
+//
+//    // Prepare OLED display
+//    OLED_Clear();
+//    char buf[32];
+//    sprintf(buf, "Target: %.1f deg", target_angle);
+//    OLED_ShowString(0, 0, (uint8_t *)buf);
+//    OLED_Refresh_Gram();
+//
+//    while (fabs(heading) < fabs(target_angle))
+//    {
+//        // --- Read and scale gyroscope data ---
+//        ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
+//        gz_dps = gz / 131.0f;
+//
+//        // --- Δt calculation ---
+//        uint32_t now = HAL_GetTick();
+//        float dt = (now - last_time) / 1000.0f;
+//        if (dt <= 0) dt = 0.001f;
+//        last_time = now;
+//
+//        // --- Gyro filtering & heading integration ---
+//        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
+//        heading += gz_filtered * dt;
+//
+//        // --- Check for completion ---
+//        if (fabs(heading) >= fabs(target_angle))
+//        {
+//            Motor_stop();
+//            HAL_Delay(300);
+//            if(dir == 0){
+//            	__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 700);
+//            	HAL_Delay(200);
+//            	__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1190);
+//            	HAL_Delay(200);
+//            }
+//            __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1190);
+//            break;
+//        }
+//
+//        // --- Update current heading on OLED ---
+//        sprintf(buf, "Current: %.1f deg", heading);
+//        OLED_ShowString(0, 20, (uint8_t *)buf);
+//        OLED_Refresh_Gram();
+//
+//        HAL_Delay(10); // ~100 Hz loop
+//    }
+//
+//    Motor_stop();
+//	HAL_Delay(300);
+//	if(dir == 0){
+//		Steering_ToUS(-35.0);
+//		HAL_Delay(200);
+//		Steering_ToUS(0.0);
+//		HAL_Delay(200);
+//	}
+//	Steering_ToUS(0.0);
+//
+//    // --- Final OLED display after completion ---
+//    OLED_Clear();
+//    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
+//    sprintf(buf, "Final Angle: %.1f", heading);
+//    OLED_ShowString(0, 20, (uint8_t *)buf);
+//    OLED_Refresh_Gram();
+//}
 
 void turn_by_angle_degrees_backwards(float target_angle, int base_pwm, float steer_angle)
 {
@@ -1123,7 +1123,7 @@ void turn_by_angle_degrees_backwards(float target_angle, int base_pwm, float ste
     // --- Control Parameters (TUNE THESE!) ---
     // *** NEW: Deadband Threshold (TUNE THIS!) ***
     // Set slightly higher than your observed stationary noise (e.g., 3.5 DPS)
-    const float GYRO_NOISE_THRESHOLD = 3.5f;
+    const float GYRO_NOISE_THRESHOLD = 0.0f;
 
     // Max allowed change in DPS for impulse rejection
     const float MAX_DPS_CHANGE = 150.0f;
@@ -1154,7 +1154,7 @@ void turn_by_angle_degrees_backwards(float target_angle, int base_pwm, float ste
     // --- Start Motor at Constant Speed ---
     Motor_set_pwm_reverse(base_pwm, base_pwm);
 
-    while (1)
+    while (fabs(heading) < fabs(target_angle))
     {
         // --- Read and scale gyroscope data ---
         ICM20948_ReadRaw(NULL, NULL, NULL, NULL, NULL, &gz);
@@ -1221,6 +1221,146 @@ void turn_by_angle_degrees_backwards(float target_angle, int base_pwm, float ste
     OLED_Clear();
     OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
     sprintf(buf, "Final Angle: %.1f", heading);
+    OLED_ShowString(0, 20, (uint8_t *)buf);
+    OLED_Refresh_Gram();
+}
+
+#define M_PI 3.14159265358979323846f
+
+/**
+ * @brief Executes an accurate angle turn using PID control over the steering servo and dynamic braking for the DC motors.
+ * * @param target_angle The desired relative turn angle in degrees (e.g., 90.0f).
+ * @param base_pwm The initial forward speed/power for the turn.
+ * @param steer_angle_ignored This argument is ignored as the PID loop controls the steering angle dynamically.
+ */
+void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle_ignored)
+{
+	float required_steer_angle;
+    // --- State and Gyro Integration Variables ---
+    float fused_heading_rad = 0.0f;       // Integrated heading change in RADIANS
+    float heading_degrees = 0.0f;         // Current heading change in DEGREES
+
+    // --- PID Variables ---
+    float heading_error = target_angle;   // Initial error
+    float heading_derivative = 0.0f;
+    float heading_last_error = heading_error;
+    uint32_t last_time = HAL_GetTick();
+
+    // PID constants - Kp for steering aggressiveness, Kd for angular damping/straightening
+    // Adjust Kp and Kd here for smooth and stable steering response.
+    const float Kp = 5.0f;
+    const float Ki = 0.0f;  // Integral term omitted for fast, precise stops
+    const float Kd = 3.5f;
+
+    // --- Control and Threshold Constants ---
+    const float ANGLE_TOLERANCE = 4.0f;    // Stop condition: Exit loop when error is within +/- 1.0 degree
+    const float BRAKE_ZONE_DEG = 20.0f;    // Start aggressively braking forward speed in the last 20 degrees
+    const int MIN_TURN_PWM = 0;            // Target minimum forward PWM (0 means full stop)
+    const int MAINTAIN_SPEED_PWM = 30;     // Minimum functional PWM for smooth steering before stopping
+    const float MAX_STEER_ANGLE = 45.0f;   // Physical limit of the servo
+
+    // Start the DC motors at the base speed (steering angle will be set by PID below)
+    Motor_set_pwm(base_pwm, base_pwm);
+
+    // Main control loop: Continue until the angular error is within tolerance
+    while (fabs(heading_error) > ANGLE_TOLERANCE)
+    {
+        // --- Δt calculation ---
+        uint32_t now = HAL_GetTick();
+        float dt = (now - last_time) / 1000.0f;
+        if (dt <= 0) dt = 0.001f;
+        last_time = now;
+
+        // --- Read Gyro and Integrate (Pure Gyro Mode) ---
+        int16_t gz_raw;
+        ICM20948_ReadRaw(NULL, NULL, NULL, NULL, NULL, &gz_raw);
+        float gz_dps = ((float)gz_raw / 131.0f) - gyro_bias; // Apply scaling and bias
+
+        // Integrate rate to find current heading change (in radians)
+        fused_heading_rad += gz_dps * (M_PI / 180.0f) * dt;
+
+        // Normalise Fused Heading (Keep within -PI to PI)
+        if (fused_heading_rad > M_PI) fused_heading_rad -= 2.0f * M_PI;
+        if (fused_heading_rad < -M_PI) fused_heading_rad += 2.0f * M_PI;
+
+        heading_degrees = fused_heading_rad * (180.0f / M_PI);
+
+        // --- PID calculations ---
+        heading_error = target_angle - fabs(heading_degrees);
+
+        heading_derivative = (heading_error - heading_last_error) / dt;
+        heading_last_error = heading_error;
+
+        // PID output controls the required STEERING ANGLE
+        required_steer_angle = Kp * heading_error + Kd * heading_derivative;
+
+        // --- Steering Control (Rotational) ---
+        if (required_steer_angle > MAX_STEER_ANGLE) required_steer_angle = MAX_STEER_ANGLE;
+        if (required_steer_angle < -MAX_STEER_ANGLE) required_steer_angle = -MAX_STEER_ANGLE;
+        Steering_ToUS(required_steer_angle);
+
+
+        // --- DYNAMIC SPEED CONTROL (Translational Braking) ---
+        float abs_error = fabs(heading_error);
+        int current_forward_pwm;
+
+        if (abs_error < BRAKE_ZONE_DEG) {
+            // Linearly scale down the forward speed in the braking zone (20 degrees)
+            float speed_factor = abs_error / BRAKE_ZONE_DEG;
+
+            // Speed ramps from base_pwm down towards MIN_TURN_PWM (0), maintaining a speed of
+            // MAINTAIN_SPEED_PWM until the last few degrees.
+            current_forward_pwm = MIN_TURN_PWM + (int)((float)(base_pwm - MIN_TURN_PWM) * speed_factor);
+
+            // Ensure the speed is at least MAINTAIN_SPEED_PWM until the very end
+            if (current_forward_pwm < MAINTAIN_SPEED_PWM && abs_error > 5.0f) {
+                 current_forward_pwm = MAINTAIN_SPEED_PWM;
+            }
+
+        } else {
+            // Outside the brake zone, maintain full base speed
+            current_forward_pwm = base_pwm;
+        }
+
+        // Clamp the dynamically calculated speed
+        if (current_forward_pwm > base_pwm) current_forward_pwm = base_pwm;
+        if (current_forward_pwm < MIN_TURN_PWM) current_forward_pwm = MIN_TURN_PWM;
+
+        // Apply the DYNAMIC forward speed to both DC motors
+        Motor_set_pwm(current_forward_pwm, current_forward_pwm);
+
+        // --- Update OLED display ---
+        OLED_Clear();
+        char buf[32];
+        sprintf(buf, "Target: %.1f deg", target_angle);
+        OLED_ShowString(0, 0, (uint8_t *)buf);
+        sprintf(buf, "Current: %.1f deg", heading_degrees);
+        OLED_ShowString(0, 20, (uint8_t *)buf);
+        sprintf(buf, "Steer: %.1f", required_steer_angle);
+        OLED_ShowString(0, 40, (uint8_t *)buf);
+        OLED_Refresh_Gram();
+
+        HAL_Delay(10); // ~100 Hz loop
+    }
+
+    // --- FINAL STOPPING SEQUENCE ---
+
+    // 1. Stop motors instantly when the angle is achieved. The dynamic braking should have brought the speed close to zero.
+    Motor_stop();
+
+    // 2. Gradually reset steering angle to stabilize the vehicle
+    float final_steer_angle = required_steer_angle;
+    for (float angle = final_steer_angle; fabs(angle) > 0.0f; angle -= (final_steer_angle / 10.0f)) {
+        Steering_ToUS(angle);
+        HAL_Delay(50);
+    }
+    Steering_ToUS(0.0); // Final reset to center
+
+    // --- Final OLED display after completion ---
+    OLED_Clear();
+    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
+    char buf[32];
+    sprintf(buf, "Final Angle: %.1f", heading_degrees);
     OLED_ShowString(0, 20, (uint8_t *)buf);
     OLED_Refresh_Gram();
 }
@@ -2491,8 +2631,8 @@ int main(void)
   Queue_Init();
   HAL_UART_Receive_IT(&huart3, (uint8_t*)rx_buffer, COMMAND_SIZE);
   //Steering_ToUS(0);HAL_Delay(800);
-  //__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 500);
-  //HAL_Delay(1500);
+  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 500);
+  HAL_Delay(1500);
   __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1200);HAL_Delay(800);
 
 
@@ -2514,7 +2654,8 @@ int main(void)
   }
   gyro_bias = gyro_bias_sum / num_cal_samples;
 
-  run_straight_to_distance_cm_MAG(300, 3500);
+  //run_straight_to_distance_cm_MAG(300, 3500);
+  turn_by_angle_degrees(90.0, 3000, 30.0);
 
   while (1){
 
