@@ -703,7 +703,7 @@ void run_straight_to_distance_cm_MAG(float target_cm, int base_pwm)
     const float slow_down_cm = 5.0f;
     const float creep_cm = 1.0f;
 
-    float Kp_h = 45.0f, Ki_h = 7.5f, Kd_h = 3.5f;
+    float Kp_h = 45.0f, Ki_h = 10.5f, Kd_h = 3.5f;
     float Kp_e = 2.0f, Ki_e = 0.04f, Kd_e = 0.1f;
     char buf[50];
 
@@ -1727,32 +1727,38 @@ static uint16_t adc_read_channel(ADC_HandleTypeDef *hadc, uint32_t channel)
 
 static inline float dist_cm_from_mv_5(uint32_t mv)
 {
-  const float A = 104.0f;         // mV
-  const float B = 23730.0f;       // mV·cm
-  if (mv <= (uint32_t)(A + 1.0f)) // avoid divide-by-zero / nonsense
-    return 80.0f;                 // clamp to far limit
-  float d = B / ((float)mv - A);
-  // optional clamping to expected range (adjust to your setup)
-  if (d < 4.0f)
-    d = 4.0f;
-  if (d > 80.0f)
-    d = 80.0f;
-  return d;
+    // Replace these with your fitted constants for this sensor
+    const float A = 5000.0f;      // Example
+    const float b = -0.085f;      // Example
+    const float C = 420.0f;       // Example
+
+    if (mv <= C + 1.0f) return 80.0f; // avoid log of zero or negative
+
+    float x = (logf((float)mv - C) - logf(A)) / b;
+
+    // Clamp distance range (adjust if needed)
+    if (x < 4.0f)  x = 4.0f;
+    if (x > 80.0f) x = 80.0f;
+
+    return x;
 }
+
 
 static inline float dist_cm_from_mv_4(uint32_t mv)
 {
-  const float A = 45.22f;         // mV
-  const float B = 22380.0f;       // mV·cm
-  if (mv <= (uint32_t)(A + 1.0f)) // avoid divide-by-zero / nonsense
-    return 80.0f;                 // clamp to far limit
-  float d = B / ((float)mv - A);
-  // optional clamping to expected range (adjust to your setup)
-  if (d < 4.0f)
-    d = 4.0f;
-  if (d > 80.0f)
-    d = 80.0f;
-  return d;
+    const float A = 4407.0f;
+    const float b = -0.09168f;
+    const float C = 487.4f;
+
+    if (mv <= C + 1.0f) return 80.0f; // avoid log of zero or negative
+
+    float x = (logf((float)mv - C) - logf(A)) / b;
+
+    // Clamp to expected physical range
+    if (x < 4.0f) x = 4.0f;
+    if (x > 80.0f) x = 80.0f;
+
+    return x;
 }
 
 // IMU configuration
@@ -2148,8 +2154,8 @@ void Task2(void){
 	float target_heading_rad;
 	int dir = -1.0f;
 	OLED_Clear();
-	run_straight_to_distance_cm_MAG(150.0, 3000);
-	HAL_Delay(8000);
+//	run_straight_to_distance_cm_MAG(150.0, 3000);
+//	HAL_Delay(8000);
 
 	float travelled_cm;
 
