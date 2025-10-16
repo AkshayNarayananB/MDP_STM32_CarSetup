@@ -34,6 +34,8 @@ float MAG_SOFT[3][3] = {
     { 2.35228020e-05, -1.10186884e-05,  3.69198217e-04 }
 };
 
+float Kp_h = 45.0f, Ki_h = 10.5f, Kd_h = 3.5f;
+float Kp_e = 2.0f, Ki_e = 0.04f, Kd_e = 0.1f;
 
 // Define the window where deceleration begins (TUNE THIS)
 const float SLOWDOWN_DEGREES = 10.0f; // Start slowing down 10 degrees before target
@@ -59,24 +61,38 @@ static inline void Servo_WriteUS(uint16_t us)
  * @param steer_angle Steering angle in degrees [-45 to +45]
  * @return uint16_t Pulse width in microseconds
  */
+
 uint16_t Steering_ToUS(int16_t steer_angle)
 {
+    // Bounds check
     if (steer_angle < -45) steer_angle = -45;
     if (steer_angle >  45) steer_angle =  45;
 
-    if(steer_angle == 0){
-    	__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1200);
-    	return 1200;
+    // Define the center pulse and use floating point for precision
+    const float CENTER_PULSE = 1200.0f;
+    float us_float;
+
+    if (steer_angle >= 0) {
+        // --- RIGHT TURN (0 to +45 degrees) ---
+        // Slope: (2500 - 1200) / 45 = 1300 / 45 us/degree
+        const float SLOPE_POS = 1300.0f / 45.0f;
+
+        // Calculation: 1200 + angle * (28.88 us/deg)
+        us_float = CENTER_PULSE + (float)steer_angle * SLOPE_POS;
+
+    } else {
+        const float SLOPE_NEG = 700.0f / 45.0f;
+
+        // Calculation: 1200 + angle * (15.55 us/deg)
+        us_float = CENTER_PULSE + (float)steer_angle * SLOPE_NEG;
     }
 
-    // Original formula: 1150 + steer_angle * (1900 / 90)
-    // Shift center by +30 µs without changing slope
-    int32_t us = 1150 + 30 + (int32_t)steer_angle * (1900 / 90);
+    uint16_t us = (uint16_t)us_float;
 
-    __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, (uint16_t)us);
-    return (uint16_t)us;
+    // Apply the PWM value
+    __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, us);
+    return us;
 }
-
 
 
 /* USER CODE BEGIN 0 */
@@ -821,290 +837,6 @@ void run_straight_to_distance_cm_MAG(float target_cm, int base_pwm)
 }
 
 
-void run_straight_to_distance_cm(float target_cm, int base_pwm)
-{
-    // --- Static variables persist across loop calls ---
-    static float heading_integral = 0.0f;
-    static float heading_last_error = 0.0f;
-    static float speed_integral = 0.0f;
-    static float speed_last_error = 0.0f;
-    static float gz_filtered = 0.0f;
-    static uint32_t last_time = 0;
-    static int32_t prev_left_counts = 0;
-    static int32_t prev_right_counts = 0;
-
-    // --- One-time initialization ---
-   static bool initialized = false;
-   if (!initialized) {
-    // Reset PID state when starting a new movement
-	   heading_integral = 0.0f;
-       heading_last_error = 0.0f;
-       speed_integral = 0.0f;
-       speed_last_error = 0.0f;
-       gz_filtered = 0.0f;
-
-       last_time = HAL_GetTick();
-       prev_left_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
-       prev_right_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
-       initialized = true;
-    }
-
-    // --- Reset encoder counts and distance tracking ---
-    int32_t start_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
-    float travelled_cm = 0.0f;
-
-    // --- Control parameters ---
-    const float tol_cm = 1.0f;
-    const float slow_down_cm = 5.0f;
-    const float creep_cm = 1.0f;
-
-    // --- PID gains (tune these!) ---
-    // Heading PID (Outer loop)
-    float Kp_h = 40.0f;
-    float Ki_h = 5.0f;
-    float Kd_h = 3.5f;
-
-    // Speed PID (Inner loop)
-    float Kp_e = 0.5f;
-    float Ki_e = 0.04f;
-    float Kd_e = 0.1f;
-
-    char buf[50];
-    float heading = 0.0f;
-
-    while (1)
-    {
-        // --- Distance travelled ---
-        int32_t cur_pos = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
-        int32_t diff = cur_pos - start_pos;
-        travelled_cm = counts_to_cm(abs(diff));
-
-        float remaining = target_cm - travelled_cm;
-
-        if (remaining <= tol_cm) {
-            Motor_stop();
-            initialized = false;
-            break;
-        }
-
-        // --- Δt calculation ---
-        uint32_t now = HAL_GetTick();
-        float dt = (now - last_time) / 1000.0f;
-        if (dt <= 0) dt = 0.001f;
-        last_time = now;
-
-        // --- Gyro Read & Heading Calculation (Outer Loop) ---
-        int16_t gz_raw;
-        ICM20948_ReadRaw(NULL, NULL, NULL, NULL, NULL, &gz_raw);
-        float gz_dps = gz_raw / 131.0f - gyro_bias;
-        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
-        heading += gz_filtered * dt;
-
-        float heading_error = 0.0f - heading;
-        heading_integral += heading_error * dt;
-        float heading_derivative = (heading_error - heading_last_error) / dt;
-        heading_last_error = heading_error;
-
-        float gyro_correction = Kp_h * heading_error + Ki_h * heading_integral + Kd_h * heading_derivative;
-
-        // --- Encoder Read & Speed Correction (Inner Loop) ---
-        int32_t left_counts  = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
-        int32_t right_counts = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
-
-        int32_t left_delta  = left_counts - prev_left_counts;
-        int32_t right_delta = right_counts - prev_right_counts;
-        prev_left_counts  = left_counts;
-        prev_right_counts = right_counts;
-
-        float speed_error = (float)(left_delta - right_delta);
-
-        speed_integral += speed_error * dt;
-        float speed_derivative = (speed_error - speed_last_error) / dt;
-        speed_last_error = speed_error;
-
-        float encoder_correction = Kp_e * speed_error + Ki_e * speed_integral + Kd_e * speed_derivative;
-
-        // --- PWM scaling ---
-        int pwm_forward = base_pwm;
-        if (remaining < slow_down_cm) pwm_forward = (int)(0.6f * base_pwm);
-        if (remaining < creep_cm) pwm_forward = pwmMin + 60;
-
-        // --- Apply Corrections ---
-        int left_pwm  = pwm_forward + (int)(0.7 * gyro_correction - 0.3 * encoder_correction);
-        int right_pwm = pwm_forward + (int)(-0.7 * gyro_correction + 0.3 * encoder_correction);
-
-        // --- Clamp PWM ---
-        if (left_pwm > pwmMax) left_pwm = pwmMax;
-        if (left_pwm < pwmMin) left_pwm = pwmMin;
-        if (right_pwm > pwmMax) right_pwm = pwmMax;
-        if (right_pwm < pwmMin) right_pwm = pwmMin;
-
-        if (heading_integral > 500) heading_integral = 500;
-        if (heading_integral < -500) heading_integral = -500;
-
-        if (speed_integral > 50) speed_integral = 50;
-        if (speed_integral < -50) speed_integral = -50;
-
-
-        Motor_set_pwm(left_pwm, right_pwm);
-
-        // --- Optional OLED updates ---
-        OLED_Clear();
-        sprintf(buf, "Target: %.1fcm", target_cm);
-        OLED_ShowString(0, 0, (uint8_t *)buf);
-        sprintf(buf, "Travel: %.1fcm", travelled_cm);
-        OLED_ShowString(0, 20, (uint8_t *)buf);
-
-        // Calculate RPM using the provided COUNTS_PER_REV
-        float left_rpm = (abs(left_delta) / COUNTS_PER_REV) / dt * 60.0f;
-        float right_rpm = (abs(right_delta) / COUNTS_PER_REV) / dt * 60.0f;
-
-        // Display live RPM
-        sprintf(buf, "L: %.1f", left_rpm);
-        OLED_ShowString(0, 40, (uint8_t *)buf);
-        sprintf(buf, "R: %.1f", right_rpm);
-        OLED_ShowString(60, 40, (uint8_t *)buf);
-
-        OLED_Refresh_Gram();
-
-        HAL_Delay(10);
-    }
-
-    // --- Final OLED display ---
-    OLED_Clear();
-    sprintf(buf, "Target: %.1fcm", target_cm);
-    OLED_ShowString(0, 0, (uint8_t *)buf);
-    sprintf(buf, "Travel: %.1fcm", travelled_cm);
-    OLED_ShowString(0, 20, (uint8_t *)buf);
-    float err_pct = (travelled_cm - target_cm) / target_cm * 100.0f;
-    sprintf(buf, "Error: %.1f%%", err_pct);
-    OLED_ShowString(0, 40, (uint8_t *)buf);
-    OLED_Refresh_Gram();
-}
-
-/**
- * @brief Turns the robot by a specified angle.
- *
- * This function uses a gyroscope to track the robot's heading and
- * performs a controlled arc until the target angle is reached.
- *
- * @param target_angle The total angle to turn in degrees.
- * Positive for right turns, negative for left turns.
- * (e.g., 90.0f to 360.0f or -90.0f to -360.0f)
- * @param base_pwm The base PWM value for the motors.
- * @param steer_angle The steering angle in degrees [-45 to +45].
- * A positive value for right turns, negative for left turns.
- */
-
-//void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle)
-//{
-//    // --- PID state variables ---
-//    float heading = 0.0f;
-//    float gz_filtered = 0.0f;
-//    uint32_t last_time = HAL_GetTick();
-//    uint16_t dir = 0;
-//
-//    // Raw sensor variables for reading
-//    int16_t ax, ay, az, gx, gy, gz;
-//    float ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps;
-//
-//    // --- Ensure steer_angle aligns with target_angle direction ---
-//    // If target is positive (right turn), ensure steer_angle is positive.
-//    // If target is negative (left turn), ensure steer_angle is negative.
-//    if (target_angle > 0 && steer_angle < 0) {
-//        steer_angle = -steer_angle;
-//    } else if (target_angle < 0 && steer_angle > 0) {
-//        steer_angle = -steer_angle;
-//        dir = 1.0f;
-//    }
-//
-//    // Ensure the steer_angle is within the safe range
-//    if (steer_angle > 45.0f) steer_angle = 45.0f;
-//    if (steer_angle < -45.0f) steer_angle = -45.0f;
-//
-//    // Set the steering angle
-//    Steering_ToUS(steer_angle);
-//    Motor_set_pwm(base_pwm, base_pwm);
-//
-//     // --- Read and scale gyroscope data ---
-//	 ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
-//	 gz_dps = gz / 131.0f;
-//
-//	 // --- Δt calculation ---
-//	 uint32_t now = HAL_GetTick();
-//	 float dt = (now - last_time) / 1000.0f;
-//	 if (dt <= 0) dt = 0.001f;
-//	 last_time = now;
-//
-//	 // --- Gyro filtering & heading integration ---
-//	  gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
-//	  heading += gz_filtered * dt;
-//
-//
-//    // Prepare OLED display
-//    OLED_Clear();
-//    char buf[32];
-//    sprintf(buf, "Target: %.1f deg", target_angle);
-//    OLED_ShowString(0, 0, (uint8_t *)buf);
-//    OLED_Refresh_Gram();
-//
-//    while (fabs(heading) < fabs(target_angle))
-//    {
-//        // --- Read and scale gyroscope data ---
-//        ICM20948_ReadRaw(&ax, &ay, &az, &gx, &gy, &gz);
-//        gz_dps = gz / 131.0f;
-//
-//        // --- Δt calculation ---
-//        uint32_t now = HAL_GetTick();
-//        float dt = (now - last_time) / 1000.0f;
-//        if (dt <= 0) dt = 0.001f;
-//        last_time = now;
-//
-//        // --- Gyro filtering & heading integration ---
-//        gz_filtered = 0.9f * gz_filtered + 0.1f * gz_dps;
-//        heading += gz_filtered * dt;
-//
-//        // --- Check for completion ---
-//        if (fabs(heading) >= fabs(target_angle))
-//        {
-//            Motor_stop();
-//            HAL_Delay(300);
-//            if(dir == 0){
-//            	__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 700);
-//            	HAL_Delay(200);
-//            	__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1190);
-//            	HAL_Delay(200);
-//            }
-//            __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1190);
-//            break;
-//        }
-//
-//        // --- Update current heading on OLED ---
-//        sprintf(buf, "Current: %.1f deg", heading);
-//        OLED_ShowString(0, 20, (uint8_t *)buf);
-//        OLED_Refresh_Gram();
-//
-//        HAL_Delay(10); // ~100 Hz loop
-//    }
-//
-//    Motor_stop();
-//	HAL_Delay(300);
-//	if(dir == 0){
-//		Steering_ToUS(-35.0);
-//		HAL_Delay(200);
-//		Steering_ToUS(0.0);
-//		HAL_Delay(200);
-//	}
-//	Steering_ToUS(0.0);
-//
-//    // --- Final OLED display after completion ---
-//    OLED_Clear();
-//    OLED_ShowString(0, 0, (uint8_t *)"Turn Complete!");
-//    sprintf(buf, "Final Angle: %.1f", heading);
-//    OLED_ShowString(0, 20, (uint8_t *)buf);
-//    OLED_Refresh_Gram();
-//}
-
 void turn_by_angle_degrees_backwards(float target_angle, int base_pwm, float steer_angle)
 {
     // --- State Variables ---
@@ -1240,6 +972,8 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle_i
     float fused_heading_rad = 0.0f;       // Integrated heading change in RADIANS
     float heading_degrees = 0.0f;         // Current heading change in DEGREES
 
+
+
     // --- PID Variables ---
     float heading_error = target_angle;   // Initial error
     float heading_derivative = 0.0f;
@@ -1276,8 +1010,22 @@ void turn_by_angle_degrees(float target_angle, int base_pwm, float steer_angle_i
         ICM20948_ReadRaw(NULL, NULL, NULL, NULL, NULL, &gz_raw);
         float gz_dps = ((float)gz_raw / 131.0f) - gyro_bias; // Apply scaling and bias
 
+        float mx = (float)mx_raw;
+		float my = (float)my_raw;
+		float mz = (float)mz_raw;
+		apply_mag_calibration(&mx, &my, &mz);
+
+		float mag_heading = atan2f(my, mx);  // radians
+		float fused_heading += gz_dps * (3.14159265f / 180.0f) * dt; // gyro integration
+		float alpha = 0.98f;
+		fused_heading = alpha * fused_heading + (1.0f - alpha) * mag_heading;
+
+		if (fused_heading > 3.14159265f) fused_heading -= 2.0f * 3.14159265f;
+		if (fused_heading < -3.14159265f) fused_heading += 2.0f * 3.14159265f;
+
+
         // Integrate rate to find current heading change (in radians)
-        fused_heading_rad += gz_dps * (M_PI / 180.0f) * dt;
+        fused_heading_rad += fused_heading * (M_PI / 180.0f) * dt;
 
         // Normalise Fused Heading (Keep within -PI to PI)
         if (fused_heading_rad > M_PI) fused_heading_rad -= 2.0f * M_PI;
@@ -1480,6 +1228,9 @@ void Execute_Command(Command_t *cmd)
     }
     else if (strcmp(cmd->buffer, "rboot") == 0){
     	HAL_NVIC_SystemReset(); //system reset -> program starts again from main
+    }
+    else if (strcmp(cmd->buffer, "START") == 0){
+        Task2(); //system reset -> program starts again from main
     }
     // -----------------------------------------------------------
     // UNKNOWN COMMAND
@@ -2045,9 +1796,9 @@ int32_t g_prev_left_counts = 0;
 int32_t g_prev_right_counts = 0;
 bool g_pid_initialized = false;
 
-// 3. PID Constants
-const float Kp_h = 40.0f, Ki_h = 5.0f, Kd_h = 3.5f;
-const float Kp_e = 0.5f, Ki_e = 0.04f, Kd_e = 0.1f;
+//// 3. PID Constants
+//const float Kp_h = 40.0f, Ki_h = 5.0f, Kd_h = 3.5f;
+//const float Kp_e = 0.5f, Ki_e = 0.04f, Kd_e = 0.1f;
 
 void pid_state_reset(void) {
     g_heading_integral = 0.0f;
@@ -2170,9 +1921,9 @@ void Task2(void){
 	Motor_set_pwm(current_pwm, current_pwm); //Move till ultrasonic
 	while (dist_cm> 45) {
 		dist_cm = HCSR04_Read();
-//  		sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
-//  		OLED_ShowString(24, 56, (uint8_t*)buf);
-//  		OLED_Refresh_Gram();
+  		sprintf(buf, "%3lu cm   ", (unsigned long)dist_cm);
+  		OLED_ShowString(24, 56, (uint8_t*)buf);
+  		OLED_Refresh_Gram();
 		pid_control_cycle(target_heading_rad, current_pwm);
 	} //Stop when distance less than 35
 	Motor_stop();
@@ -2410,7 +2161,7 @@ void Task2(void){
 		}
 	}
 
-	while (s<15) { //Continue reading IR till it senses the exit point
+	while (s<27) { //Continue reading IR till it senses the exit point
 		if (dir > 0) { //if turn left
 			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
 			mv = (uint32_t)raw * 3300u / 4095u;
@@ -2473,7 +2224,7 @@ void Task2(void){
 	}
 
 
-	while (s < 15) { //Continue reading IR till it senses the exit point
+	while (s < 27) { //Continue reading IR till it senses the exit point
 		if (dir > 0) { //if turn left
 			raw = adc_read_channel(&hadc1, ADC_CHANNEL_5); //Right IR sensor should get ready
 			mv = (uint32_t)raw * 3300u / 4095u;
@@ -2635,13 +2386,13 @@ int main(void)
 
 
   Queue_Init();
-  HAL_UART_Receive_IT(&huart3, (uint8_t*)rx_buffer, COMMAND_SIZE);
+  //HAL_UART_Receive_IT(&huart3, (uint8_t*)rx_buffer, COMMAND_SIZE);
   //Steering_ToUS(0);HAL_Delay(800);
-  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 500);
-  HAL_Delay(1500);
+  Steering_ToUS(-45);
+  HAL_Delay(800);
   __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 1200);HAL_Delay(800);
 
-
+  int dir = 1.0;
   // --- Gyro warm-up (reduce jerk from bad first samples) ---
   for (int i = 0; i < 50; i++) {   // ~500 ms
 	  int16_t gz_raw;
@@ -2660,8 +2411,16 @@ int main(void)
   }
   gyro_bias = gyro_bias_sum / num_cal_samples;
 
-  //run_straight_to_distance_cm_MAG(300, 3500);
+  turn_by_angle_degrees(dir *40,3500,dir*25);
+  turn_by_angle_degrees(dir * -30, 3700, dir * -20); //Straighten
+  run_straight_to_distance_cm_backward_MAG(20.0,2000);
+  turn_by_angle_degrees(dir * 30, 1600, dir * 40); //Straighten
+  HAL_Delay(1000);
+  run_straight_to_distance_cm_backward_MAG(20.0,2000);
+
+  run_straight_to_distance_cm_MAG(300, 3500);
   turn_by_angle_degrees(90.0, 3000, 30.0);
+  //Task2();
 
   while (1){
 
